@@ -7,6 +7,8 @@ repo_name: moongdevstudio/AssetPlus
 
 theme:
   name: material
+  logo: images/logo.png
+  favicon: images/icon.png
   palette:
     - scheme: slate
       primary: blue

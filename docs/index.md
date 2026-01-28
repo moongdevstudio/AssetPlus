@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/icon.png" width="128">
+</p>
+
 # AssetPlus
 
 A unified asset browser for Godot 4.x that brings together multiple asset sources into one powerful interface.

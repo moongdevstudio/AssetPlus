@@ -1,11 +1,17 @@
-# AssetPlus
+<p align="center">
+  <img src="addons/assetplus/icon.png" width="128">
+</p>
 
-[![Godot 4.3+](https://img.shields.io/badge/Godot-4.3%2B-blue?logo=godot-engine&logoColor=white)](https://godotengine.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/moongdevstudio/AssetPlus)](https://github.com/moongdevstudio/AssetPlus/releases)
-[![Documentation](https://img.shields.io/badge/docs-online-blue)](https://moongdevstudio.github.io/AssetPlus/)
+<h1 align="center">AssetPlus</h1>
 
-A unified asset browser for Godot 4.x that brings together multiple asset sources into one powerful interface.
+<p align="center">
+  <a href="https://godotengine.org/"><img src="https://img.shields.io/badge/Godot-4.3%2B-blue?logo=godot-engine&logoColor=white" alt="Godot 4.3+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+  <a href="https://github.com/moongdevstudio/AssetPlus/releases"><img src="https://img.shields.io/github/v/release/moongdevstudio/AssetPlus" alt="GitHub release"></a>
+  <a href="https://moongdevstudio.github.io/AssetPlus/"><img src="https://img.shields.io/badge/docs-online-blue" alt="Documentation"></a>
+</p>
+
+<p align="center">A unified asset browser for Godot 4.x that brings together multiple asset sources into one powerful interface.</p>
 
 ![AssetPlus Store Browser](screens/storescreenshot.png)
 
