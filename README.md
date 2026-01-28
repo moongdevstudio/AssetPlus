@@ -15,14 +15,10 @@
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=ioUR2K8xtNE">
-    <img src="https://github.com/moongdevstudio/AssetPlus/raw/master/videoshort.mp4" alt="AssetPlus Demo" width="600">
+    <img src="videoshort.gif" alt="AssetPlus Demo" width="600">
   </a>
 </p>
 <p align="center"><a href="https://www.youtube.com/watch?v=ioUR2K8xtNE">▶️ Watch the full demo video on YouTube</a></p>
-
-<p align="right"><a href="https://moongdevstudio.github.io/AssetPlus/">📖 Documentation</a></p>
-
-![AssetPlus Store Browser](screens/storescreenshot.png)
 
 ## Features
 
