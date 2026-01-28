@@ -1860,10 +1860,20 @@ func _show_favorites() -> void:
 		_assets.append(info)
 		_create_asset_card(info)
 
-	# Show "No results" if filtering returned no matches
-	if _assets.is_empty() and (not _search_query.is_empty() or _filter_selected_category != "All" or _filter_selected_source != "All"):
-		_loading_label.text = "No favorites match the current filters"
-		_loading_label.visible = true
+	# Show empty state messages
+	if _assets.is_empty():
+		if _favorites.is_empty():
+			# No favorites at all
+			var info_label = Label.new()
+			info_label.text = "You don't have any favorites yet.\n\nClick the ♥ icon on any asset from the Store,\nInstalled, or Global Folder tabs to add it here."
+			info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			info_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+			_assets_grid.add_child(info_label)
+		elif not _search_query.is_empty() or _filter_selected_category != "All" or _filter_selected_source != "All":
+			# Has favorites but filters don't match
+			_loading_label.text = "No favorites match the current filters"
+			_loading_label.visible = true
 
 
 func _on_open_global_folder_pressed() -> void:
@@ -1907,6 +1917,7 @@ func _show_global_folder() -> void:
 		var info_label = Label.new()
 		info_label.text = "No global folder configured.\nGo to Settings to set your Global Asset Folder."
 		info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		info_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
 		_assets_grid.add_child(info_label)
 		return
@@ -1916,6 +1927,7 @@ func _show_global_folder() -> void:
 		var info_label = Label.new()
 		info_label.text = "Global folder not found:\n%s" % global_folder
 		info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		info_label.add_theme_color_override("font_color", Color(0.8, 0.4, 0.4))
 		_assets_grid.add_child(info_label)
 		return
@@ -1926,6 +1938,7 @@ func _show_global_folder() -> void:
 		var info_label = Label.new()
 		info_label.text = "Cannot access global folder:\n%s" % global_folder
 		info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		info_label.add_theme_color_override("font_color", Color(0.8, 0.4, 0.4))
 		_assets_grid.add_child(info_label)
 		return
@@ -1962,8 +1975,9 @@ func _show_global_folder() -> void:
 
 	if packages.is_empty():
 		var info_label = Label.new()
-		info_label.text = "No .godotpackage packages found in:\n%s" % global_folder
+		info_label.text = "No packages in your Global Folder yet.\n\nRight-click any folder in the FileSystem dock\nand select 'Export as .godotpackage' to add assets here."
 		info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		info_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
 		_assets_grid.add_child(info_label)
 		return
@@ -2581,10 +2595,20 @@ func _scan_native_addons(exclude_paths: Array[String]) -> void:
 
 	dir.list_dir_end()
 
-	# Show "No results" if filtering returned no matches
-	if _assets.is_empty() and (not _search_query.is_empty() or _filter_selected_category != "All" or _filter_selected_source != "All"):
-		_loading_label.text = "No installed assets match the current filters"
-		_loading_label.visible = true
+	# Show empty state messages
+	if _assets.is_empty():
+		if _search_query.is_empty() and _filter_selected_category == "All" and _filter_selected_source == "All":
+			# No addons installed at all
+			var info_label = Label.new()
+			info_label.text = "No addons installed in this project.\n\nInstall assets from the Store, Favorites, or Global Folder tabs."
+			info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			info_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+			_assets_grid.add_child(info_label)
+		else:
+			# Has addons but filters don't match
+			_loading_label.text = "No installed assets match the current filters"
+			_loading_label.visible = true
 
 
 func _fetch_godot_assets() -> void:
@@ -4563,25 +4587,12 @@ func _load_favorites() -> void:
 	var config = ConfigFile.new()
 	var favorites_path = _get_global_favorites_path()
 
-	# Try loading from global path first
 	if config.load(favorites_path) == OK:
 		var data = config.get_value("favorites", "list", [])
 		for item in data:
 			if item is Dictionary:
 				_favorites.append(item)
-		SettingsDialog.debug_print(" Loaded %d global favorites from %s" % [_favorites.size(), favorites_path])
-	else:
-		# Migration: try loading from old project-local path
-		var old_path = "user://asset_store_favorites.cfg"
-		if config.load(old_path) == OK:
-			var data = config.get_value("favorites", "list", [])
-			for item in data:
-				if item is Dictionary:
-					_favorites.append(item)
-			# Save to new global location
-			if _favorites.size() > 0:
-				_save_favorites()
-				SettingsDialog.debug_print(" Migrated %d favorites to global storage" % _favorites.size())
+		SettingsDialog.debug_print(" Loaded %d favorites from %s" % [_favorites.size(), favorites_path])
 
 
 func _save_favorites() -> void:

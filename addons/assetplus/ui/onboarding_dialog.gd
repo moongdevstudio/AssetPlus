@@ -246,6 +246,22 @@ func _build_ui() -> void:
 	page_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
 	title_vbox.add_child(page_label)
 
+	# Spacer to push documentation button to the right
+	var header_spacer = Control.new()
+	header_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header_hbox.add_child(header_spacer)
+
+	# Online Documentation button (top right)
+	var docs_btn = Button.new()
+	docs_btn.text = "Online Documentation"
+	docs_btn.tooltip_text = "Open online documentation in browser"
+	docs_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var editor_theme = EditorInterface.get_editor_theme()
+	if editor_theme:
+		docs_btn.icon = editor_theme.get_icon("ExternalLink", "EditorIcons")
+	docs_btn.pressed.connect(func(): OS.shell_open("https://moongdevstudio.github.io/AssetPlus/"))
+	header_hbox.add_child(docs_btn)
+
 	# Tab preview container (shows how the tab button looks)
 	_tab_preview_container = HBoxContainer.new()
 	_tab_preview_container.add_theme_constant_override("separation", 10)
