@@ -18,7 +18,7 @@
     <img src="https://img.youtube.com/vi/ioUR2K8xtNE/maxresdefault.jpg" alt="Watch the demo" width="600">
   </a>
 </p>
-<p align="center"><a href="https://www.youtube.com/watch?v=ioUR2K8xtNE">▶️ Watch the demo video</a></p>
+<p align="center"><a href="https://www.youtube.com/watch?v=ioUR2K8xtNE">▶️ Watch the full demo video</a></p>
 
 <p align="right"><a href="https://moongdevstudio.github.io/AssetPlus/">📖 Documentation</a></p>
 
