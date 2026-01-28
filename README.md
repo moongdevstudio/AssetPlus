@@ -13,18 +13,18 @@ A unified asset browser for Godot 4.x that brings together multiple asset source
 | **Multi-Source Browser** | Search Godot AssetLib, Godot Store Beta & Godot Shaders in one place |
 | **One-Click Install** | Install any asset directly into your project |
 | **Installed Tracking** | See all addons in your project with source matching |
-| **Global Library** | Build a personal collection of `.godotpackage` files |
+| **Global Library** | Build a personal collection of reusable assets as `.godotpackage` files |
 | **Favorites Sync** | Save favorites, synced across all projects |
 | **Auto-Update** | Get notified of new versions automatically |
 
 ### Browse Multiple Sources
 - **Godot AssetLib** - Official Godot Asset Library
 - **Godot Store Beta** - New Godot store (store-beta.godotengine.org)
-- **Godot Shaders** - Community shaders from godotshaders.com
+- **Godot Shaders** - Community shaders from godotshaders.com (browse only, redirects to site)
 
 ### Global Asset Library
 Build your personal asset collection:
-- Export any folder as a `.godotpackage` file
+- Export any folder or addon as a `.godotpackage` file stored locally
 - Store packages in a central **Global Folder**
 - Install your packages into any project
 - Right-click export from FileSystem dock
