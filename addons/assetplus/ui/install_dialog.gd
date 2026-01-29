@@ -311,8 +311,40 @@ func setup(asset_info: Dictionary) -> void:
 	_template_folder = ""
 	_default_install_root = ""
 	_is_install_at_root = false
-	if _install_path_label:
-		_install_path_label.text = "Install to: res://"
+
+	# Check if this is an update with a specific target path
+	# update_target_path is the EXACT folder to replace (e.g., res://addons/script_splitter or res://Packages/script_splitter)
+	var update_target_path = asset_info.get("update_target_path", "")
+	if not update_target_path.is_empty():
+		# Store the target path for deletion of old folder before install
+		_asset_info["_update_target_path"] = update_target_path
+
+		# Check if asset is at its default location (res://addons/) or has been moved
+		if update_target_path.begins_with("res://addons/"):
+			# Plugin is at default location - DON'T set _custom_install_root because:
+			# - ZIP contains paths like "addons/script_splitter/..."
+			# - rel_path already has "addons/" prefix
+			# - Normal install to res:// + rel_path works correctly
+			SettingsDialog.debug_print("Update mode: plugin at default location %s (no custom install root)" % update_target_path)
+		else:
+			# Asset has been moved to a custom location
+			# We need to strip the "addons/" prefix from rel_path and install to the moved location
+			# Store info about the moved location for _build_plugin_file_list to handle
+			_asset_info["_update_moved_location"] = true
+			_asset_info["_update_install_parent"] = update_target_path.get_base_dir()  # e.g., "res://Packages"
+			_asset_info["_update_folder_name"] = update_target_path.get_file()  # e.g., "script_splitter"
+			SettingsDialog.debug_print("Update mode: asset moved to %s, parent=%s, folder=%s" % [
+				update_target_path,
+				_asset_info["_update_install_parent"],
+				_asset_info["_update_folder_name"]
+			])
+
+		if _install_path_label:
+			_install_path_label.text = "Update: %s" % update_target_path
+	else:
+		if _install_path_label:
+			_install_path_label.text = "Install to: res://"
+
 	if _install_root_btn:
 		_install_root_btn.button_pressed = false
 		_install_root_btn.visible = false
@@ -997,8 +1029,21 @@ func _build_plugin_file_list(files: PackedStringArray) -> void:
 	# Original plugin handling - install to addons/
 	# Note: rel_path already includes "addons/" prefix, so _custom_install_root stays empty
 	# Files install to res:// + rel_path = res://addons/...
-	if _install_path_label:
-		_install_path_label.text = "Install to: res://addons/"
+
+	# Check if this is an update to a moved location
+	var is_moved_update = _asset_info.get("_update_moved_location", false)
+	var moved_parent = _asset_info.get("_update_install_parent", "")  # e.g., "res://Packages"
+	var moved_folder = _asset_info.get("_update_folder_name", "")  # e.g., "script_splitter"
+
+	if is_moved_update and not moved_parent.is_empty():
+		# For moved assets, set custom install root to the new parent
+		_custom_install_root = moved_parent
+		if _install_path_label:
+			_install_path_label.text = "Update to: %s/%s/" % [moved_parent, moved_folder]
+		SettingsDialog.debug_print("Plugin update to moved location: %s/%s" % [moved_parent, moved_folder])
+	else:
+		if _install_path_label:
+			_install_path_label.text = "Install to: res://addons/"
 
 	for file_path in files:
 		if file_path.ends_with("/"):
@@ -1020,6 +1065,21 @@ func _build_plugin_file_list(files: PackedStringArray) -> void:
 					rel_path = "addons/%s/%s" % [_plugin_folder, rel_path]
 				else:
 					continue
+
+			# For moved updates, strip "addons/" prefix and use folder name from moved location
+			# rel_path is like "addons/script_splitter/file.gd" -> "script_splitter/file.gd"
+			if is_moved_update and not moved_folder.is_empty():
+				if rel_path.begins_with("addons/"):
+					var after_addons = rel_path.substr(7)  # Remove "addons/"
+					# Get the original folder name from the path
+					var slash_idx = after_addons.find("/")
+					if slash_idx > 0:
+						# Replace original folder name with moved folder name
+						var rest_of_path = after_addons.substr(slash_idx)  # e.g., "/file.gd"
+						rel_path = moved_folder + rest_of_path  # e.g., "script_splitter/file.gd"
+					else:
+						# No subfolder, just use the file
+						rel_path = moved_folder + "/" + after_addons
 
 			_zip_files.append({
 				"zip_path": file_path,
@@ -1932,55 +1992,87 @@ func _on_confirmed() -> void:
 	var installed_paths: Array = []
 	var seen_folders: Dictionary = {}
 
-	# For PLUGIN: collect addons/ paths
+	# For PLUGIN: collect addons/ paths (or moved location for updates)
 	# For ASSET: collect assets/<folder>/ path
 	# For PROJECT: collect the root path
 	# For GODOTPACKAGE: collect plugin folder (rel_path starts with plugin name, installed to addons/)
+	var is_moved_update = _asset_info.get("_update_moved_location", false)
+
 	match _package_type:
 		PackageType.PLUGIN:
-			for file_info in selected_files:
-				var rel_path: String = file_info["rel_path"]
-				if rel_path.begins_with("addons/"):
+			if is_moved_update:
+				# For moved updates, rel_path is like "folder_name/file.gd" and install_root is the parent
+				for file_info in selected_files:
+					var rel_path: String = file_info["rel_path"]
 					var parts = rel_path.split("/")
-					if parts.size() >= 2:
-						var folder_name = parts[1]
+					if parts.size() >= 1:
+						var folder_name = parts[0]
 						if not seen_folders.has(folder_name):
 							seen_folders[folder_name] = true
-							installed_paths.append(install_root.path_join("addons/" + folder_name))
+							installed_paths.append(install_root.path_join(folder_name))
+			else:
+				# Normal plugin install - rel_path starts with "addons/"
+				for file_info in selected_files:
+					var rel_path: String = file_info["rel_path"]
+					if rel_path.begins_with("addons/"):
+						var parts = rel_path.split("/")
+						if parts.size() >= 2:
+							var folder_name = parts[1]
+							if not seen_folders.has(folder_name):
+								seen_folders[folder_name] = true
+								installed_paths.append(install_root.path_join("addons/" + folder_name))
 
 		PackageType.GODOTPACKAGE:
-			# For GODOTPACKAGE, rel_path starts with plugin name directly (e.g., "primes/api/file.gd")
-			# install_root is already "res://addons", so just append plugin_name
-			for file_info in selected_files:
-				var rel_path: String = file_info["rel_path"]
-				var parts = rel_path.split("/")
-				if parts.size() >= 1:
-					var plugin_name = parts[0]
-					if not seen_folders.has(plugin_name):
-						seen_folders[plugin_name] = true
-						installed_paths.append(install_root.path_join(plugin_name))
+			# For GODOTPACKAGE, behavior depends on the manifest type
+			var gdpkg_type = _godotpackage_manifest.get("type", "").to_lower()
+			if gdpkg_type in ["asset", "project"]:
+				# For assets/projects, install_root IS the target folder (e.g., res://Packages/projectile)
+				# Just use install_root directly as the single path
+				installed_paths.append(install_root.trim_suffix("/"))
+			else:
+				# For plugins, rel_path starts with plugin name directly (e.g., "primes/api/file.gd")
+				# install_root is "res://addons", so append plugin_name
+				for file_info in selected_files:
+					var rel_path: String = file_info["rel_path"]
+					var parts = rel_path.split("/")
+					if parts.size() >= 1:
+						var plugin_name = parts[0]
+						if not seen_folders.has(plugin_name):
+							seen_folders[plugin_name] = true
+							installed_paths.append(install_root.path_join(plugin_name))
 
 		PackageType.ASSET:
-			# For assets, collect the top-level folder under assets/
-			for file_info in selected_files:
-				var rel_path: String = file_info["rel_path"]
-				var parts = rel_path.split("/")
-				if parts.size() >= 1:
-					var folder_name = parts[0]
-					if not seen_folders.has(folder_name):
-						seen_folders[folder_name] = true
-						installed_paths.append(install_root.path_join(folder_name))
+			# For assets with custom install root, include the asset folder name
+			if not _custom_install_root.is_empty():
+				var asset_root = _custom_install_root.trim_suffix("/")
+				if not _asset_folder_name.is_empty():
+					asset_root = asset_root.path_join(_asset_folder_name)
+				installed_paths.append(asset_root)
+			else:
+				# Default: collect the top-level folder under assets/
+				for file_info in selected_files:
+					var rel_path: String = file_info["rel_path"]
+					var parts = rel_path.split("/")
+					if parts.size() >= 1:
+						var folder_name = parts[0]
+						if not seen_folders.has(folder_name):
+							seen_folders[folder_name] = true
+							installed_paths.append(install_root.path_join(folder_name))
 
 		PackageType.PROJECT:
-			# For projects, collect top-level folders
-			for file_info in selected_files:
-				var rel_path: String = file_info["rel_path"]
-				var parts = rel_path.split("/")
-				if parts.size() >= 1:
-					var folder_name = parts[0]
-					if not seen_folders.has(folder_name):
-						seen_folders[folder_name] = true
-						installed_paths.append(install_root.path_join(folder_name))
+			# For templates with custom install root, use the custom root as the main path
+			if not _custom_install_root.is_empty():
+				installed_paths.append(_custom_install_root.trim_suffix("/"))
+			else:
+				# Default: collect top-level folders
+				for file_info in selected_files:
+					var rel_path: String = file_info["rel_path"]
+					var parts = rel_path.split("/")
+					if parts.size() >= 1:
+						var folder_name = parts[0]
+						if not seen_folders.has(folder_name):
+							seen_folders[folder_name] = true
+							installed_paths.append(install_root.path_join(folder_name))
 			# Also collect addon paths (installed to res://addons/)
 			for file_info in selected_addon_files:
 				var rel_path: String = file_info["rel_path"]
@@ -1995,6 +2087,36 @@ func _on_confirmed() -> void:
 	# Reset installation tracking
 	_install_succeeded.clear()
 	_install_failed.clear()
+
+	# For updates: disable plugin if enabled, then delete the old folder before installing new version
+	var update_target_path = _asset_info.get("_update_target_path", "")
+	var plugin_was_enabled := false
+	var plugin_to_reenable := ""
+	if not update_target_path.is_empty():
+		# Check if this is a plugin and if it's enabled
+		if update_target_path.begins_with("res://addons/"):
+			var plugin_name = update_target_path.get_file()
+			var plugin_cfg_path = update_target_path.path_join("plugin.cfg")
+			if FileAccess.file_exists(plugin_cfg_path):
+				# Check if plugin is enabled
+				if EditorInterface.is_plugin_enabled(plugin_name):
+					plugin_was_enabled = true
+					plugin_to_reenable = plugin_name
+					SettingsDialog.debug_print("Update: Disabling plugin '%s' before update" % plugin_name)
+					_status_label.text = "Disabling plugin..."
+					await get_tree().process_frame
+					EditorInterface.set_plugin_enabled(plugin_name, false)
+					# Wait a bit for Godot to fully disable the plugin
+					await get_tree().create_timer(0.3).timeout
+
+		SettingsDialog.debug_print("Update: Deleting old folder before install: %s" % update_target_path)
+		_status_label.text = "Removing old version..."
+		await get_tree().process_frame
+		var delete_success = _delete_directory_recursive(update_target_path)
+		if delete_success:
+			SettingsDialog.debug_print("Update: Successfully deleted old folder: %s" % update_target_path)
+		else:
+			SettingsDialog.debug_print("Update: Failed to delete old folder (may not exist): %s" % update_target_path)
 
 	for file_info in selected_files:
 		var zip_path: String = file_info["zip_path"]
@@ -2124,6 +2246,20 @@ func _on_confirmed() -> void:
 	_state = State.DONE
 	_status_label.text = _build_completion_message(imported_inputs_count)
 
+	# IMPORTANT: Create version.cfg and persist installation BEFORE filesystem scan
+	# Godot's filesystem scan causes script reload which cancels any pending signal handlers
+	_create_version_cfg_for_installed_paths(installed_paths)
+
+	# Copy embedded icon from .godotpackage to the installed folder
+	_copy_embedded_icon_to_installed(installed_paths)
+
+	# Pre-collect file paths for tracking (UIDs will be empty but paths are tracked)
+	# This allows recovery after script reload even without UIDs
+	var pre_tracked: Array = []
+	for file_path in _install_succeeded:
+		pre_tracked.append({"path": file_path, "uid": ""})
+	_persist_pending_installation(installed_paths, pre_tracked)
+
 	# Close dialog immediately
 	hide()
 
@@ -2139,6 +2275,14 @@ func _on_confirmed() -> void:
 
 	# Wait for filesystem scan to complete (uses signal, not fixed timer)
 	await _wait_for_filesystem_scan_complete()
+
+	# Re-enable plugin if it was enabled before the update
+	if plugin_was_enabled and not plugin_to_reenable.is_empty():
+		SettingsDialog.debug_print("Update: Re-enabling plugin '%s' after update" % plugin_to_reenable)
+		# Wait a bit before re-enabling to ensure files are fully registered
+		await get_tree().create_timer(0.2).timeout
+		EditorInterface.set_plugin_enabled(plugin_to_reenable, true)
+		SettingsDialog.debug_print("Update: Plugin '%s' re-enabled" % plugin_to_reenable)
 
 	# Collect ALL installed files (with UIDs when available, without for files like .md, LICENSE, etc.)
 	var tracked_uids: Array = []
@@ -2156,6 +2300,9 @@ func _on_confirmed() -> void:
 		for gen_file in generated_files:
 			var uid = _get_file_uid(gen_file)
 			tracked_uids.append({"path": gen_file, "uid": uid})
+
+	# Update pending installation with UIDs (version.cfg was already created before scan)
+	_persist_pending_installation(installed_paths, tracked_uids)
 
 	# Emit signal with tracked files
 	SettingsDialog.debug_print_verbose("Emitting installation_complete - paths=%d, tracked_files=%d" % [installed_paths.size(), tracked_uids.size()])
@@ -2263,6 +2410,38 @@ func _scan_folder_recursive(folder_path: String) -> Array:
 
 	dir.list_dir_end()
 	return files
+
+
+func _delete_directory_recursive(dir_path: String) -> bool:
+	## Recursively delete a directory and all its contents
+	var global_path = ProjectSettings.globalize_path(dir_path)
+	if not DirAccess.dir_exists_absolute(global_path):
+		return false
+
+	var dir = DirAccess.open(global_path)
+	if dir == null:
+		return false
+
+	dir.list_dir_begin()
+	var file_name = dir.get_next()
+
+	while file_name != "":
+		if file_name != "." and file_name != "..":
+			var full_path = dir_path.path_join(file_name)
+			var full_global_path = global_path.path_join(file_name)
+			if dir.current_is_dir():
+				# Recurse into subdirectory
+				_delete_directory_recursive(full_path)
+			else:
+				# Delete file
+				DirAccess.remove_absolute(full_global_path)
+		file_name = dir.get_next()
+
+	dir.list_dir_end()
+
+	# Delete the now-empty directory
+	var err = DirAccess.remove_absolute(global_path)
+	return err == OK
 
 
 func _wait_for_filesystem_scan_complete() -> void:
@@ -3208,3 +3387,148 @@ func _trigger_filesystem_scan() -> void:
 
 func _exit_tree() -> void:
 	_cleanup_resources()
+
+
+func _create_version_cfg_for_installed_paths(installed_paths: Array) -> void:
+	## Create version.cfg for assets without plugin.cfg
+	## This allows tracking updates for templates and non-plugin assets
+	var version = _asset_info.get("version", "")
+	var source = _asset_info.get("source", "")
+
+	# For GODOTPACKAGE, get version from manifest if not in asset_info
+	if version.is_empty() and _package_type == PackageType.GODOTPACKAGE:
+		version = _godotpackage_manifest.get("version", "")
+
+	# Use "unknown" if version is still empty
+	if version.is_empty():
+		version = "unknown"
+
+	# For templates/assets with custom install root, create version.cfg at the actual install location
+	# For ASSET type, include the asset folder name to get the real path
+	if not _custom_install_root.is_empty() and _package_type in [PackageType.PROJECT, PackageType.ASSET]:
+		var root_path = _custom_install_root.trim_suffix("/")
+		# For assets, the actual install path includes the asset folder name
+		if _package_type == PackageType.ASSET and not _asset_folder_name.is_empty():
+			root_path = root_path.path_join(_asset_folder_name)
+		var plugin_cfg_path = root_path + "/plugin.cfg"
+		if not FileAccess.file_exists(plugin_cfg_path):
+			var version_cfg_path = root_path + "/version.cfg"
+			var cfg = ConfigFile.new()
+			cfg.set_value("assetplus", "version", version)
+			cfg.set_value("assetplus", "installed_at", Time.get_unix_time_from_system())
+			if not source.is_empty():
+				cfg.set_value("assetplus", "source", source)
+
+			var err = cfg.save(version_cfg_path)
+			if err == OK:
+				SettingsDialog.debug_print("Created version.cfg at %s (version: %s)" % [root_path, version])
+			else:
+				SettingsDialog.debug_print("Failed to create version.cfg at %s: %d" % [root_path, err])
+		return
+
+	# For GODOTPACKAGE assets/projects, installed_paths should now contain a single root path
+	# Create version.cfg there
+	if _package_type == PackageType.GODOTPACKAGE:
+		var gdpkg_type = _godotpackage_manifest.get("type", "").to_lower()
+		if gdpkg_type in ["asset", "project"] and installed_paths.size() == 1:
+			var root_path = installed_paths[0].trim_suffix("/") if installed_paths[0] is String else ""
+			if not root_path.is_empty():
+				var plugin_cfg_path = root_path + "/plugin.cfg"
+				if not FileAccess.file_exists(plugin_cfg_path):
+					var version_cfg_path = root_path + "/version.cfg"
+					var cfg = ConfigFile.new()
+					cfg.set_value("assetplus", "version", version)
+					cfg.set_value("assetplus", "installed_at", Time.get_unix_time_from_system())
+					if not source.is_empty():
+						cfg.set_value("assetplus", "source", source)
+
+					var err = cfg.save(version_cfg_path)
+					if err == OK:
+						SettingsDialog.debug_print("Created version.cfg for GDPKG at %s (version: %s)" % [root_path, version])
+					else:
+						SettingsDialog.debug_print("Failed to create version.cfg for GDPKG at %s: %d" % [root_path, err])
+			return
+
+	# Standard behavior for plugins and assets without custom root
+	for addon_path in installed_paths:
+		if addon_path is not String or addon_path.is_empty():
+			continue
+
+		# Skip if plugin.cfg exists (it already has version)
+		var plugin_cfg_path = addon_path.trim_suffix("/") + "/plugin.cfg"
+		if FileAccess.file_exists(plugin_cfg_path):
+			continue
+
+		# Create version.cfg
+		var version_cfg_path = addon_path.trim_suffix("/") + "/version.cfg"
+		var cfg = ConfigFile.new()
+		cfg.set_value("assetplus", "version", version)
+		cfg.set_value("assetplus", "installed_at", Time.get_unix_time_from_system())
+		if not source.is_empty():
+			cfg.set_value("assetplus", "source", source)
+
+		var err = cfg.save(version_cfg_path)
+		if err == OK:
+			SettingsDialog.debug_print("Created version.cfg for %s (version: %s)" % [addon_path, version])
+		else:
+			SettingsDialog.debug_print("Failed to create version.cfg for %s: %d" % [addon_path, err])
+
+
+func _copy_embedded_icon_to_installed(installed_paths: Array) -> void:
+	## Copy icon.png from the .godotpackage to the installed folder (if present)
+	## This allows the icon to be displayed for installed Global Folder assets
+	if _package_type != PackageType.GODOTPACKAGE:
+		return
+
+	if _zip_path.is_empty():
+		return
+
+	# Check if icon.png exists in the package
+	var reader = ZIPReader.new()
+	var err = reader.open(_zip_path)
+	if err != OK:
+		return
+
+	if not reader.file_exists("icon.png"):
+		reader.close()
+		return
+
+	var icon_data = reader.read_file("icon.png")
+	reader.close()
+
+	if icon_data.size() == 0:
+		return
+
+	# Copy to the first installed path (the main folder)
+	if installed_paths.size() > 0 and installed_paths[0] is String:
+		var target_path = installed_paths[0].trim_suffix("/") + "/icon.png"
+		# Always copy the icon from the package (overwrite if exists)
+		var file = FileAccess.open(target_path, FileAccess.WRITE)
+		if file:
+			file.store_buffer(icon_data)
+			file.close()
+			SettingsDialog.debug_print("Copied embedded icon to %s" % target_path)
+
+
+func _persist_pending_installation(installed_paths: Array, tracked_uids: Array) -> void:
+	## Persist installation info to a file so main_panel can recover it after script reload
+	## This is needed because Godot's script reload can cancel signal handlers
+	var pending_path = "user://assetplus_pending_install.cfg"
+	var cfg = ConfigFile.new()
+
+	# Generate asset_id if missing
+	var asset_id = _asset_info.get("asset_id", "")
+	if asset_id.is_empty():
+		asset_id = "installed_%d" % Time.get_unix_time_from_system()
+
+	cfg.set_value("pending", "asset_id", asset_id)
+	cfg.set_value("pending", "paths", installed_paths)
+	cfg.set_value("pending", "info", _asset_info)
+	cfg.set_value("pending", "uids", tracked_uids)
+	cfg.set_value("pending", "timestamp", Time.get_unix_time_from_system())
+
+	var err = cfg.save(pending_path)
+	if err == OK:
+		SettingsDialog.debug_print("Persisted pending installation for %s" % _asset_info.get("title", asset_id))
+	else:
+		SettingsDialog.debug_print("Failed to persist pending installation: %d" % err)

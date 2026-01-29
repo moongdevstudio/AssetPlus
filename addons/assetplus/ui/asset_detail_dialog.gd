@@ -5,6 +5,7 @@ extends AcceptDialog
 
 signal install_requested(asset_info: Dictionary)
 signal uninstall_requested(asset_info: Dictionary)
+signal update_requested(asset_info: Dictionary)
 signal favorite_toggled(asset_info: Dictionary, is_favorite: bool)
 signal remove_from_global_folder_requested(asset_info: Dictionary)
 signal add_to_global_folder_requested(asset_info: Dictionary)
@@ -26,10 +27,11 @@ var _license_label: Label
 var _source_btn: Button  # Clickable source link
 var _description: RichTextLabel
 var _install_btn: Button
+var _update_btn: Button
 var _open_browser_btn: Button
 var _favorite_btn: Button
-var _open_explorer_btn: Button
-var _open_godot_btn: Button
+var _explore_btn: MenuButton
+var _explore_popup: PopupMenu
 var _remove_global_btn: Button
 var _add_to_global_btn: Button
 var _edit_global_btn: Button
@@ -40,6 +42,8 @@ var _file_list_btn: Button
 var _asset_info: Dictionary = {}
 var _is_favorite: bool = false
 var _is_installed: bool = false
+var _has_update: bool = false
+var _update_version: String = ""
 var _download_url: String = ""
 var _http_request: HTTPRequest
 var _tracked_files: Array = []  # Array of {path: String, uid: String}
@@ -87,7 +91,32 @@ func _build_ui() -> void:
 	# Get editor theme for icons
 	var theme = EditorInterface.get_editor_theme()
 
-	# Buttons
+	# Update button (green, visible when update available) - BEFORE Install so it appears above
+	_update_btn = Button.new()
+	_update_btn.text = "Update"
+	_update_btn.icon = theme.get_icon("Reload", "EditorIcons")
+	_update_btn.pressed.connect(_on_update_pressed)
+	_update_btn.visible = false  # Only show when update available
+	# Green style for update button
+	var update_style = StyleBoxFlat.new()
+	update_style.bg_color = Color(0.2, 0.5, 0.2)
+	update_style.set_corner_radius_all(4)
+	update_style.content_margin_left = 10
+	update_style.content_margin_right = 10
+	update_style.content_margin_top = 5
+	update_style.content_margin_bottom = 5
+	_update_btn.add_theme_stylebox_override("normal", update_style)
+	var update_hover_style = StyleBoxFlat.new()
+	update_hover_style.bg_color = Color(0.25, 0.6, 0.25)
+	update_hover_style.set_corner_radius_all(4)
+	update_hover_style.content_margin_left = 10
+	update_hover_style.content_margin_right = 10
+	update_hover_style.content_margin_top = 5
+	update_hover_style.content_margin_bottom = 5
+	_update_btn.add_theme_stylebox_override("hover", update_hover_style)
+	left_vbox.add_child(_update_btn)
+
+	# Install/Uninstall button
 	_install_btn = Button.new()
 	_install_btn.text = "Install"
 	_install_btn.icon = theme.get_icon("AssetLib", "EditorIcons")
@@ -108,19 +137,18 @@ func _build_ui() -> void:
 	_add_to_global_btn.visible = false  # Only show when installed
 	left_vbox.add_child(_add_to_global_btn)
 
-	_open_explorer_btn = Button.new()
-	_open_explorer_btn.text = "Open in Explorer"
-	_open_explorer_btn.icon = theme.get_icon("Filesystem", "EditorIcons")
-	_open_explorer_btn.pressed.connect(_on_open_explorer_pressed)
-	_open_explorer_btn.visible = false  # Only show when installed
-	left_vbox.add_child(_open_explorer_btn)
+	# Explore menu button (combines "Open in Explorer" and "Open in Godot")
+	_explore_btn = MenuButton.new()
+	_explore_btn.text = "Explore..."
+	_explore_btn.icon = theme.get_icon("Filesystem", "EditorIcons")
+	_explore_btn.flat = false  # Same style as other buttons
+	_explore_btn.visible = false  # Only show when installed
+	left_vbox.add_child(_explore_btn)
 
-	_open_godot_btn = Button.new()
-	_open_godot_btn.text = "Open in Godot"
-	_open_godot_btn.icon = theme.get_icon("FileTree", "EditorIcons")
-	_open_godot_btn.pressed.connect(_on_open_godot_pressed)
-	_open_godot_btn.visible = false  # Only show when installed
-	left_vbox.add_child(_open_godot_btn)
+	_explore_popup = _explore_btn.get_popup()
+	_explore_popup.add_icon_item(theme.get_icon("FileTree", "EditorIcons"), "In Godot FileSystem", 0)
+	_explore_popup.add_icon_item(theme.get_icon("Filesystem", "EditorIcons"), "In OS File Explorer", 1)
+	_explore_popup.id_pressed.connect(_on_explore_menu_pressed)
 
 	_remove_global_btn = Button.new()
 	_remove_global_btn.text = "Remove from Global"
@@ -193,6 +221,7 @@ func _build_ui() -> void:
 	right_vbox.add_child(meta_grid)
 
 	_add_meta_row(meta_grid, "Author:", "_author_label")
+
 	_add_meta_row(meta_grid, "Version:", "_version_label")
 	_add_meta_row(meta_grid, "Category:", "_category_label")
 	_add_meta_row(meta_grid, "License:", "_license_label")
@@ -306,13 +335,22 @@ func setup(info: Dictionary, is_favorite: bool = false, is_installed: bool = fal
 		# Use Godot icon as fallback placeholder
 		_icon_rect.texture = EditorInterface.get_editor_theme().get_icon("Godot", "EditorIcons")
 
+	# Check if this is AssetPlus itself (special handling)
+	var is_assetplus = info.get("is_assetplus", false) or info.get("asset_id", "") == "assetplus-self"
+
 	_update_favorite_button()
 	_update_install_button()
 
+	# Hide certain buttons for AssetPlus itself
+	if is_assetplus:
+		_favorite_btn.visible = false
+		_install_btn.visible = false  # Can't uninstall AssetPlus from within AssetPlus
+		_add_to_global_btn.visible = false
+
 	# Show remove, edit, and extract buttons for global folder items
-	_remove_global_btn.visible = source == "GlobalFolder"
-	_edit_global_btn.visible = source == "GlobalFolder"
-	_extract_package_btn.visible = source == "GlobalFolder"
+	_remove_global_btn.visible = source == "GlobalFolder" and not is_assetplus
+	_edit_global_btn.visible = source == "GlobalFolder" and not is_assetplus
+	_extract_package_btn.visible = source == "GlobalFolder" and not is_assetplus
 
 	# Note: "Add to Global Folder" button visibility is handled by _update_install_button()
 
@@ -346,9 +384,8 @@ func _legacy_get_addon_folder_name() -> String:
 func _update_install_button() -> void:
 	var source = _asset_info.get("source", "")
 
-	# Show "Open in Explorer" and "Open in Godot" buttons only when installed
-	_open_explorer_btn.visible = _is_installed
-	_open_godot_btn.visible = _is_installed
+	# Show "Explore..." menu button only when installed
+	_explore_btn.visible = _is_installed
 
 	# Show "Add to Global Folder" button for installed items (but not GlobalFolder items)
 	_add_to_global_btn.visible = _is_installed and source != "GlobalFolder"
@@ -728,7 +765,21 @@ func _on_open_browser_pressed() -> void:
 		OS.shell_open(url)
 
 
-func _on_open_explorer_pressed() -> void:
+func _on_update_pressed() -> void:
+	## Handle update button press - emit signal to main panel
+	update_requested.emit(_asset_info)
+
+
+func _on_explore_menu_pressed(id: int) -> void:
+	## Handle explore menu item selection
+	match id:
+		0:  # In Godot FileSystem
+			_open_in_godot()
+		1:  # In OS File Explorer
+			_open_in_explorer()
+
+
+func _open_in_explorer() -> void:
 	# Get the installed path(s)
 	var paths = _asset_info.get("installed_paths", [])
 	if paths.is_empty():
@@ -747,7 +798,7 @@ func _on_open_explorer_pressed() -> void:
 	OS.shell_show_in_file_manager(global_path)
 
 
-func _on_open_godot_pressed() -> void:
+func _open_in_godot() -> void:
 	# Get the installed path(s)
 	var paths = _asset_info.get("installed_paths", [])
 	if paths.is_empty():
@@ -773,6 +824,20 @@ func set_installed(installed: bool, installed_paths: Array = []) -> void:
 	elif not installed:
 		_asset_info.erase("installed_paths")
 	_update_install_button()
+
+
+func set_update_available(has_update: bool, new_version: String = "") -> void:
+	## Set whether an update is available for this asset
+	_has_update = has_update
+	_update_version = new_version
+	if _update_btn:
+		_update_btn.visible = has_update
+		if has_update and not new_version.is_empty():
+			_update_btn.text = "Update to %s" % new_version
+			_update_btn.tooltip_text = "Update available: %s" % new_version
+		else:
+			_update_btn.text = "Update"
+			_update_btn.tooltip_text = ""
 
 
 func _on_remove_global_pressed() -> void:
@@ -810,12 +875,86 @@ func _on_edit_global_pressed() -> void:
 	# Show edit dialog for global folder item metadata
 	var edit_dialog = AcceptDialog.new()
 	edit_dialog.title = "Edit Package Info"
-	edit_dialog.size = Vector2i(450, 400)
+	edit_dialog.size = Vector2i(500, 500)
 	edit_dialog.ok_button_text = "Save"
 
 	var main_vbox = VBoxContainer.new()
 	main_vbox.add_theme_constant_override("separation", 10)
 	edit_dialog.add_child(main_vbox)
+
+	# Icon section
+	var icon_hbox = HBoxContainer.new()
+	icon_hbox.add_theme_constant_override("separation", 10)
+	main_vbox.add_child(icon_hbox)
+
+	var icon_preview = TextureRect.new()
+	icon_preview.custom_minimum_size = Vector2(64, 64)
+	icon_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon_preview.texture = _icon_rect.texture  # Use current icon
+	icon_hbox.add_child(icon_preview)
+
+	var icon_vbox = VBoxContainer.new()
+	icon_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	icon_hbox.add_child(icon_vbox)
+
+	var icon_label = Label.new()
+	icon_label.text = "Package Icon"
+	icon_vbox.add_child(icon_label)
+
+	var icon_btn_hbox = HBoxContainer.new()
+	icon_btn_hbox.add_theme_constant_override("separation", 5)
+	icon_vbox.add_child(icon_btn_hbox)
+
+	var change_icon_btn = Button.new()
+	change_icon_btn.text = "Change Icon..."
+	icon_btn_hbox.add_child(change_icon_btn)
+
+	var remove_icon_btn = Button.new()
+	remove_icon_btn.text = "Remove"
+	remove_icon_btn.modulate = Color(1, 0.7, 0.7)
+	icon_btn_hbox.add_child(remove_icon_btn)
+
+	# Track new icon data using a Dictionary so lambdas can modify it
+	# (GDScript lambdas capture by value, not reference, so we need a container)
+	var icon_state := {"data": PackedByteArray(), "remove": false}
+
+	change_icon_btn.pressed.connect(func():
+		var file_dialog = FileDialog.new()
+		file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+		file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+		file_dialog.filters = ["*.png ; PNG Images", "*.jpg,*.jpeg ; JPEG Images"]
+		file_dialog.title = "Select Icon Image"
+
+		file_dialog.file_selected.connect(func(path: String):
+			var img = Image.load_from_file(path)
+			if img:
+				# Resize to 128x128 if larger
+				if img.get_width() > 128 or img.get_height() > 128:
+					img.resize(128, 128, Image.INTERPOLATE_LANCZOS)
+				icon_state["data"] = img.save_png_to_buffer()
+				icon_preview.texture = ImageTexture.create_from_image(img)
+				icon_state["remove"] = false
+			file_dialog.queue_free()
+		)
+
+		file_dialog.canceled.connect(func():
+			file_dialog.queue_free()
+		)
+
+		EditorInterface.get_base_control().add_child(file_dialog)
+		file_dialog.popup_centered(Vector2i(600, 400))
+	)
+
+	remove_icon_btn.pressed.connect(func():
+		icon_preview.texture = EditorInterface.get_editor_theme().get_icon("Godot", "EditorIcons")
+		icon_state["data"] = PackedByteArray()
+		icon_state["remove"] = true
+	)
+
+	# Separator
+	var sep = HSeparator.new()
+	main_vbox.add_child(sep)
 
 	var grid = GridContainer.new()
 	grid.columns = 2
@@ -875,7 +1014,7 @@ func _on_edit_global_pressed() -> void:
 	var desc_edit = TextEdit.new()
 	desc_edit.text = _asset_info.get("description", "")
 	desc_edit.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	desc_edit.custom_minimum_size.y = 100
+	desc_edit.custom_minimum_size.y = 80
 	main_vbox.add_child(desc_edit)
 
 	edit_dialog.confirmed.connect(func():
@@ -885,7 +1024,9 @@ func _on_edit_global_pressed() -> void:
 			"version": version_edit.text.strip_edges(),
 			"category": category_edit.text.strip_edges(),
 			"license": license_edit.text.strip_edges(),
-			"description": desc_edit.text.strip_edges()
+			"description": desc_edit.text.strip_edges(),
+			"_new_icon_data": icon_state["data"],
+			"_remove_icon": icon_state["remove"]
 		}
 		metadata_edited.emit(_asset_info, new_metadata)
 		# Update local display
@@ -896,6 +1037,14 @@ func _on_edit_global_pressed() -> void:
 		_license_label.text = new_metadata["license"] if not new_metadata["license"].is_empty() else "MIT"
 		_description.text = new_metadata["description"]
 		title = new_metadata["name"]
+		# Update icon display
+		var icon_data: PackedByteArray = icon_state["data"]
+		if icon_data.size() > 0:
+			var img = Image.new()
+			if img.load_png_from_buffer(icon_data) == OK:
+				_icon_rect.texture = ImageTexture.create_from_image(img)
+		elif icon_state["remove"]:
+			_icon_rect.texture = EditorInterface.get_editor_theme().get_icon("Godot", "EditorIcons")
 		edit_dialog.queue_free()
 	)
 
@@ -1122,3 +1271,5 @@ func _get_icon_for_type(type_name: String) -> Texture2D:
 			return theme.get_icon("ImportCheck", "EditorIcons")
 		_:
 			return theme.get_icon("File", "EditorIcons")
+
+

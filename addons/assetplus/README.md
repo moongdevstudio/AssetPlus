@@ -15,6 +15,7 @@ A unified asset browser for Godot 4.x that brings together multiple asset source
 - Track all installed addons in the **Installed** tab
 - Auto-detect installed addons and match with online sources
 - Uninstall addons cleanly
+- Update notifications for installed assets
 
 ### Global Asset Library
 Build your personal asset collection:
@@ -22,6 +23,7 @@ Build your personal asset collection:
 - Store packages in a central **Global Folder**
 - Install your packages into any project
 - Right-click export from FileSystem dock
+- Edit package metadata and icons
 
 ### Favorites
 - Save favorite assets with one click
@@ -30,7 +32,7 @@ Build your personal asset collection:
 ### Package Export
 Export project folders with full metadata:
 - Name, description, author, version, license
-- Custom icon
+- Custom icon (embedded in package)
 - Input actions & autoloads included
 - Checksums for integrity
 

@@ -1207,6 +1207,19 @@ func _do_export(output_path: String, package_name: String, files: Array[Dictiona
 			writer.write_file(manifest_json.to_utf8_buffer())
 			writer.close_file()
 
+		# Include icon if available (passed as _icon_texture from main_panel)
+		var icon_tex = _original_asset_info.get("_icon_texture", null)
+		if icon_tex is Texture2D:
+			var img = icon_tex.get_image()
+			if img:
+				var png_data = img.save_png_to_buffer()
+				if png_data.size() > 0:
+					err = writer.start_file("icon.png")
+					if err == OK:
+						writer.write_file(png_data)
+						writer.close_file()
+						manifest["has_icon"] = true
+
 	# Add files
 	var total = files.size()
 	var current = 0

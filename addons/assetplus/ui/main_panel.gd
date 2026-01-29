@@ -34,6 +34,10 @@ const GLOBAL_FAVORITES_FOLDER = "GodotAssetPlus"
 const GLOBAL_FAVORITES_FILE = "favorites.cfg"
 const GLOBAL_CONFIG_FILE = "config.cfg"
 
+# AssetPlus self-identification (to filter from stores and show specially in Installed)
+const ASSETPLUS_NAMES = ["assetplus", "asset plus", "asset-plus", "asset_plus"]
+const ASSETPLUS_ASSET_ID = ""  # Fill this when published to AssetLib
+
 var _default_icon: Texture2D = null
 
 enum Tab { STORE, INSTALLED, FAVORITES, GLOBAL_FOLDER }
@@ -109,6 +113,13 @@ var _linkup_pending: Dictionary = {}  # folder_name -> true (for ongoing searche
 var _session_installed_paths: Array[String] = []  # Paths installed during this session (may crash if deleted)
 var _update_checker: RefCounted  # Keep reference to prevent garbage collection
 
+# Update checking for installed addons
+var _update_cache: Dictionary = {}  # asset_id -> {latest_version: String, godot_version: String, versions: Array, checked_at: int}
+var _update_check_pending: Dictionary = {}  # asset_id -> true (for ongoing checks)
+var _ignored_updates: Dictionary = {}  # asset_id -> version (ignored version string)
+const UPDATE_CACHE_PATH = "user://asset_store_updates.cfg"
+const UPDATE_CACHE_TTL = 3600  # Cache updates for 1 hour (in seconds)
+
 # Filters for Installed/Favorites tabs
 var _filter_selected_category: String = "All"
 var _filter_selected_source: String = "All"
@@ -117,12 +128,21 @@ var _available_sources: Array[String] = []
 
 
 func _ready() -> void:
+	SettingsDialog.debug_print("main_panel._ready() called")
 	_load_default_icon()
 	_load_favorites()
 	_load_installed_registry()
 	_load_linkup_cache()
+	_load_update_cache()
+	var recovered = _recover_pending_installation()  # Recover installations interrupted by script reload
+	SettingsDialog.debug_print("Recovery result: %s" % str(recovered))
 	_setup_ui()
-	call_deferred("_search_assets")
+	# If we recovered an installation/update, show Installed tab; otherwise show Store
+	if recovered:
+		SettingsDialog.debug_print("Switching to Installed tab after recovery")
+		call_deferred("_switch_tab", Tab.INSTALLED)
+	else:
+		call_deferred("_search_assets")
 	# Start linkup scan in background when AssetPlus opens
 	call_deferred("_start_linkup_scan")
 	# Check if this is first launch
@@ -795,6 +815,25 @@ func _read_godotpackage_manifest(file_path: String) -> Dictionary:
 
 	reader.close()
 	return manifest
+
+
+func _extract_icon_from_godotpackage(file_path: String) -> Texture2D:
+	## Extract icon.png from a .godotpackage file if it exists
+	var reader = ZIPReader.new()
+	var err = reader.open(file_path)
+	if err != OK:
+		return null
+
+	var icon_tex: Texture2D = null
+	if reader.file_exists("icon.png"):
+		var data = reader.read_file("icon.png")
+		if data.size() > 0:
+			var img = Image.new()
+			if img.load_png_from_buffer(data) == OK:
+				icon_tex = ImageTexture.create_from_image(img)
+
+	reader.close()
+	return icon_tex
 
 
 func _show_settings_panel() -> void:
@@ -1969,6 +2008,12 @@ func _show_global_folder() -> void:
 					"icon_url": manifest.get("icon_url", ""),
 					"original_asset_id": manifest.get("original_asset_id", "")
 				}
+
+				# Try to extract embedded icon from the .godotpackage
+				var embedded_icon = _extract_icon_from_godotpackage(full_path)
+				if embedded_icon:
+					info["_embedded_icon"] = embedded_icon
+
 				packages.append(info)
 		file_name = dir.get_next()
 	dir.list_dir_end()
@@ -2038,12 +2083,20 @@ func _create_global_folder_card(info: Dictionary) -> void:
 	_assets_grid.add_child(card)
 	_cards.append(card)
 
-	# Load icon (from URL if available, otherwise default)
-	var icon_url = info.get("icon_url", "")
-	if not icon_url.is_empty():
-		_load_icon(card, icon_url)
-	elif _default_icon:
-		card.set_icon(_default_icon)
+	# Load icon: prioritize embedded icon, then URL, then default
+	var embedded_icon = info.get("_embedded_icon", null)
+	if embedded_icon is Texture2D:
+		card.set_icon(embedded_icon)
+		# Also cache it for the detail dialog
+		var icon_url = info.get("icon_url", "")
+		if not icon_url.is_empty():
+			_icon_cache[icon_url] = embedded_icon
+	else:
+		var icon_url = info.get("icon_url", "")
+		if not icon_url.is_empty():
+			_load_icon(card, icon_url)
+		elif _default_icon:
+			card.set_icon(_default_icon)
 
 
 func _on_global_folder_card_clicked(info: Dictionary) -> void:
@@ -2063,8 +2116,10 @@ func _on_global_folder_card_clicked(info: Dictionary) -> void:
 		var paths = _get_installed_addon_paths(asset_id)
 		display_info["installed_paths"] = paths
 
-	# Get icon from cache if available
-	var icon_tex = _icon_cache.get(info.get("icon_url", ""), _default_icon)
+	# Get icon: prioritize embedded icon, then cache, then default
+	var icon_tex: Texture2D = info.get("_embedded_icon", null)
+	if not icon_tex:
+		icon_tex = _icon_cache.get(info.get("icon_url", ""), _default_icon)
 	dialog.setup(display_info, is_fav, is_installed, icon_tex)
 
 	# Pass tracked files if installed (with resolved paths)
@@ -2089,9 +2144,13 @@ func _on_global_folder_install_requested(info: Dictionary) -> void:
 	if godotpackage_path.is_empty():
 		return
 
+	# Use the global_ prefix for asset_id so it's linked to the Global Folder source
+	var global_asset_id = "global_" + godotpackage_path.get_file().get_basename()
+
 	var install_dialog = InstallDialog.new()
 	EditorInterface.get_base_control().add_child(install_dialog)
-	install_dialog.setup_from_local_godotpackage(godotpackage_path)
+	# Pass the global asset_id so the installation is tracked under the same ID
+	install_dialog.setup_from_local_godotpackage(godotpackage_path, {"asset_id": global_asset_id})
 
 	install_dialog.installation_complete.connect(func(success: bool, paths: Array, tracked_uids: Array):
 		SettingsDialog.debug_print_verbose("Global Folder installation_complete - success=%s, paths=%s" % [success, str(paths)])
@@ -2101,28 +2160,31 @@ func _on_global_folder_install_requested(info: Dictionary) -> void:
 			for p in paths:
 				if p not in _session_installed_paths:
 					_session_installed_paths.append(p)
-			# Register in installed registry
+			# Register in installed registry using the global_ asset_id
 			var manifest = _read_godotpackage_manifest(godotpackage_path)
-			var asset_id = "global_" + godotpackage_path.get_file().get_basename()
 
-			SettingsDialog.debug_print_verbose("Registering global folder install - asset_id='%s'" % asset_id)
+			SettingsDialog.debug_print_verbose("Registering global folder install - asset_id='%s'" % global_asset_id)
 
 			var reg_info: Dictionary = {
-				"asset_id": asset_id,
+				"asset_id": global_asset_id,
 				"title": manifest.get("name", godotpackage_path.get_file().get_basename()),
 				"author": manifest.get("author", "Unknown"),
 				"description": manifest.get("description", ""),
 				"category": manifest.get("type", "Asset"),
+				"version": manifest.get("version", ""),
 				"source": SOURCE_GLOBAL_FOLDER,
-				"original_source": manifest.get("original_source", "")
+				"original_source": manifest.get("original_source", ""),
+				"original_browse_url": manifest.get("original_browse_url", ""),
+				"original_url": manifest.get("original_url", ""),
+				"godotpackage_path": godotpackage_path  # Store path to extract icon later
 			}
 
-			_register_installed_addon(asset_id, paths, reg_info, tracked_uids)
+			_register_installed_addon(global_asset_id, paths, reg_info, tracked_uids)
 			# Update the detail dialog if open
 			if _current_detail_dialog and is_instance_valid(_current_detail_dialog):
 				_current_detail_dialog.set_installed(true, paths)
 			# Update card badge
-			_update_card_installed_status(asset_id, true)
+			_update_card_installed_status(global_asset_id, true)
 			_show_global_folder()  # Refresh
 			# Safe scan filesystem
 			_queue_safe_scan()
@@ -2186,8 +2248,12 @@ func _on_global_folder_metadata_edited(info: Dictionary, new_metadata: Dictionar
 			var json = JSON.new()
 			if json.parse(data.get_string_from_utf8()) == OK:
 				manifest = json.data
-		else:
+		elif file_path != "icon.png":  # Don't keep old icon if we're updating it
 			files_data[file_path] = data
+		else:
+			# Keep old icon unless we're changing it
+			if not new_metadata.get("_remove_icon", false) and new_metadata.get("_new_icon_data", PackedByteArray()).size() == 0:
+				files_data[file_path] = data
 
 	reader.close()
 
@@ -2205,6 +2271,17 @@ func _on_global_folder_metadata_edited(info: Dictionary, new_metadata: Dictionar
 	if new_metadata.has("description"):
 		manifest["description"] = new_metadata["description"]
 
+	# Handle icon changes
+	var new_icon_data: PackedByteArray = new_metadata.get("_new_icon_data", PackedByteArray())
+	var remove_icon: bool = new_metadata.get("_remove_icon", false)
+
+	if remove_icon:
+		manifest["has_icon"] = false
+		# icon.png already excluded from files_data above
+	elif new_icon_data.size() > 0:
+		manifest["has_icon"] = true
+		# New icon will be added below
+
 	# Write updated package
 	var writer = ZIPPacker.new()
 	err = writer.open(godotpackage_path)
@@ -2216,6 +2293,12 @@ func _on_global_folder_metadata_edited(info: Dictionary, new_metadata: Dictionar
 	writer.start_file("manifest.json")
 	writer.write_file(JSON.stringify(manifest, "\t").to_utf8_buffer())
 	writer.close_file()
+
+	# Write new icon if provided
+	if new_icon_data.size() > 0:
+		writer.start_file("icon.png")
+		writer.write_file(new_icon_data)
+		writer.close_file()
 
 	# Write all other files
 	for file_path in files_data:
@@ -2353,7 +2436,14 @@ func _show_export_for_global_folder(folder_path: String, info: Dictionary) -> vo
 	# Open export dialog configured for global folder (locked to .godotpackage, auto-export)
 	var dialog = ExportDialog.new()
 	EditorInterface.get_base_control().add_child(dialog)
-	dialog.setup_for_global_folder(folder_path, global_folder, info)
+
+	# Pass the cached icon texture if available
+	var export_info = info.duplicate()
+	var icon_url = info.get("icon_url", "")
+	if not icon_url.is_empty() and _icon_cache.has(icon_url):
+		export_info["_icon_texture"] = _icon_cache[icon_url]
+
+	dialog.setup_for_global_folder(folder_path, global_folder, export_info)
 
 	dialog.export_completed.connect(func(success: bool, output_path: String):
 		if success:
@@ -2415,8 +2505,20 @@ func _show_installed() -> void:
 	_loading_label.text = "Loading..."
 	_loading_label.visible = false
 
+	# Try to recover any pending installations (in case callback was lost)
+	_recover_pending_installation()
+
+	# Collect UIDs for assets that don't have them (after script reload recovery)
+	_collect_missing_uids()
+
 	# Clean up registry first to remove non-existent entries
 	_cleanup_installed_registry()
+
+	# Check for updates in background
+	call_deferred("_check_addon_updates")
+
+	# Show AssetPlus first (always, with special treatment)
+	_create_assetplus_card()
 
 	# Collect all paths from registry to avoid duplicates with scanned addons
 	var registry_paths: Array[String] = []
@@ -2469,6 +2571,36 @@ func _show_installed() -> void:
 		# Add ALL installed paths (for multi-folder assets)
 		info["installed_path"] = paths[0]  # Primary path for backward compatibility
 		info["installed_paths"] = paths     # All paths for grouped display
+
+		# Determine the best version to use
+		# We compare stored_version (from store at install time) and local_version (from plugin.cfg)
+		# Use the HIGHER version to handle cases where:
+		# - Author forgot to update plugin.cfg (stored > local)
+		# - User manually updated the plugin (local > stored)
+		var stored_version = stored_info.get("version", "")
+		var local_version = _get_local_version(paths[0])
+		var final_version = ""
+
+		if not stored_version.is_empty() and not local_version.is_empty():
+			# Compare versions - use the higher one
+			if _compare_versions(stored_version, local_version) > 0:
+				final_version = stored_version
+			else:
+				final_version = local_version
+		elif not local_version.is_empty():
+			final_version = local_version
+		elif not stored_version.is_empty():
+			final_version = stored_version
+
+		if not final_version.is_empty():
+			info["version"] = final_version
+
+		SettingsDialog.debug_print_verbose("Installed asset '%s': stored_version=%s, local_version=%s, final_version=%s" % [
+			info.get("title", "?"),
+			stored_version if not stored_version.is_empty() else "none",
+			local_version if not local_version.is_empty() else "none",
+			final_version if not final_version.is_empty() else "none"
+		])
 
 		# Filter by search
 		if not _search_query.is_empty():
@@ -2695,6 +2827,9 @@ func _on_godot_response(result: int, code: int, body: PackedByteArray) -> void:
 			"support_level": asset.get("support_level", ""),
 			"browse_url": "https://godotengine.org/asset-library/asset/" + str(asset.get("asset_id", ""))
 		}
+		# Skip AssetPlus itself from store results
+		if _is_assetplus(info):
+			continue
 		_assets.append(info)
 		_create_asset_card(info)
 
@@ -2865,6 +3000,9 @@ func _on_godot_beta_api_response(result: int, code: int, body: PackedByteArray) 
 			"browse_url": asset.get("store_url", "https://store-beta.godotengine.org/asset/%s/%s/" % [publisher_slug, asset_slug]),
 			"reviews_score": asset.get("reviews_score", 0)
 		}
+		# Skip AssetPlus itself from store results
+		if _is_assetplus(info):
+			continue
 		_assets.append(info)
 		_create_asset_card(info)
 
@@ -3128,6 +3266,81 @@ func _create_asset_card(info: Dictionary) -> void:
 		card.set_icon(_default_icon)
 
 
+func _create_assetplus_card() -> void:
+	## Create a special card for AssetPlus itself (always shown first in Installed)
+	var addon_path = "res://addons/assetplus"
+	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(addon_path)):
+		return
+
+	# Read version from plugin.cfg
+	var version = "1.0.0"
+	var cfg = ConfigFile.new()
+	if cfg.load(addon_path + "/plugin.cfg") == OK:
+		version = cfg.get_value("plugin", "version", version)
+
+	var info = {
+		"asset_id": "assetplus-self",
+		"title": "AssetPlus",
+		"author": "MoongDevStudio",
+		"source": "This Plugin",
+		"version": version,
+		"category": "Tools",
+		"license": "MIT",
+		"description": "The asset browser you're currently using!",
+		"browse_url": "https://github.com/moongdevstudio/AssetPlus",
+		"installed_path": addon_path,
+		"is_assetplus": true  # Special flag
+	}
+
+	# Check search filter
+	if not _search_query.is_empty():
+		if not _search_query.to_lower() in info.get("title", "").to_lower():
+			return
+
+	# Check category filter
+	if _filter_selected_category != "All":
+		if info.get("category", "") != _filter_selected_category:
+			return
+
+	# Check source filter - "This Plugin" should match only when All or specific
+	if _filter_selected_source != "All" and _filter_selected_source != "This Plugin":
+		return
+
+	var card_width = _calculate_card_width()
+	var card = AssetCard.new()
+	card.custom_minimum_size = Vector2(card_width, CARD_HEIGHT)
+
+	# Setup card without favorites (pass false for is_favorite, true for is_installed)
+	card.setup(info, false, true)
+
+	# Hide favorite button for AssetPlus
+	card.set_favorite_visible(false)
+
+	card.clicked.connect(_on_asset_clicked)
+	# Don't connect favorite_clicked since we hide the button
+	_assets_grid.add_child(card)
+	_cards.append(card)
+
+	# Plugin toggle (AssetPlus is always a plugin)
+	var is_enabled = _is_plugin_enabled(addon_path)
+	card.set_plugin_visible(true)
+	card.set_plugin_enabled(is_enabled)
+	card.plugin_toggled.connect(func(_card_info, enabled):
+		_set_plugin_enabled(addon_path, enabled)
+	)
+
+	# Load icon from addon folder
+	var icon_path = addon_path + "/icon.png"
+	if FileAccess.file_exists(icon_path):
+		var icon_texture = load(icon_path)
+		if icon_texture:
+			card.set_icon(icon_texture)
+	elif _default_icon:
+		card.set_icon(_default_icon)
+
+	_assets.append(info)
+
+
 func _create_installed_card(info: Dictionary) -> void:
 	# For assets with multiple folders, create a grouped display
 	var paths: Array = info.get("installed_paths", [])
@@ -3152,6 +3365,13 @@ func _create_installed_card(info: Dictionary) -> void:
 		_assets_grid.add_child(card)
 		_cards.append(card)
 
+		# Check for update available
+		var asset_id = info.get("asset_id", "")
+		var installed_version = info.get("version", "")
+		if _has_update_available(asset_id, installed_version):
+			var update_info = _get_update_info(asset_id)
+			card.set_update_available(true, update_info.get("latest_version", ""))
+
 		# Setup plugin toggle if it's a plugin
 		if has_plugin:
 			var is_enabled = _is_plugin_enabled(single_path)
@@ -3163,11 +3383,20 @@ func _create_installed_card(info: Dictionary) -> void:
 			)
 
 		# Load icon (with fallback to default)
-		var icon_url = info.get("icon_url", "")
-		if not icon_url.is_empty():
-			_load_icon(card, icon_url)
-		elif _default_icon:
-			card.set_icon(_default_icon)
+		# For GlobalFolder items, extract icon from the godotpackage file
+		var godotpackage_path = info.get("godotpackage_path", "")
+		if not godotpackage_path.is_empty() and FileAccess.file_exists(godotpackage_path):
+			var icon_texture = _extract_icon_from_godotpackage(godotpackage_path)
+			if icon_texture:
+				card.set_icon(icon_texture)
+			elif _default_icon:
+				card.set_icon(_default_icon)
+		else:
+			var icon_url = info.get("icon_url", "")
+			if not icon_url.is_empty():
+				_load_icon(card, icon_url)
+			elif _default_icon:
+				card.set_icon(_default_icon)
 		return
 
 	# Multiple folders - card with small expand indicator at bottom right
@@ -3184,12 +3413,28 @@ func _create_installed_card(info: Dictionary) -> void:
 	_assets_grid.add_child(card)
 	_cards.append(card)
 
+	# Check for update available
+	var asset_id = info.get("asset_id", "")
+	var installed_version = info.get("version", "")
+	if _has_update_available(asset_id, installed_version):
+		var update_info = _get_update_info(asset_id)
+		card.set_update_available(true, update_info.get("latest_version", ""))
+
 	# Load icon (with fallback to default)
-	var icon_url = info.get("icon_url", "")
-	if not icon_url.is_empty():
-		_load_icon(card, icon_url)
-	elif _default_icon:
-		card.set_icon(_default_icon)
+	# For GlobalFolder items, extract icon from the godotpackage file
+	var godotpackage_path = info.get("godotpackage_path", "")
+	if not godotpackage_path.is_empty() and FileAccess.file_exists(godotpackage_path):
+		var icon_texture = _extract_icon_from_godotpackage(godotpackage_path)
+		if icon_texture:
+			card.set_icon(icon_texture)
+		elif _default_icon:
+			card.set_icon(_default_icon)
+	else:
+		var icon_url = info.get("icon_url", "")
+		if not icon_url.is_empty():
+			_load_icon(card, icon_url)
+		elif _default_icon:
+			card.set_icon(_default_icon)
 
 	# Check if any folder has a plugin and count enabled
 	var plugin_paths: Array = []
@@ -3313,11 +3558,11 @@ func _create_installed_card(info: Dictionary) -> void:
 		del_btn.add_theme_color_override("font_color", Color(0.8, 0.4, 0.4))
 		del_btn.tooltip_text = "Delete only this folder"
 		var path_to_delete = folder_path
-		var asset_id = info.get("asset_id", "")
+		var del_asset_id = info.get("asset_id", "")
 		del_btn.pressed.connect(func():
 			overlay.visible = false
 			expand_btn.text = "%d ▼" % paths.size()
-			_uninstall_single_folder(asset_id, path_to_delete, info.get("title", "addon"))
+			_uninstall_single_folder(del_asset_id, path_to_delete, info.get("title", "addon"))
 		)
 		sub_item.add_child(del_btn)
 
@@ -3768,14 +4013,50 @@ func _on_asset_clicked(info: Dictionary) -> void:
 
 	# Add installed paths to info for the "Open in Explorer" button
 	var display_info = info.duplicate()
+	var registry_paths: Array = []
 	if is_installed:
-		var paths = _get_installed_addon_paths(asset_id)
-		if paths.size() > 0:
-			display_info["installed_paths"] = paths
+		registry_paths = _get_installed_addon_paths(asset_id)
+		if registry_paths.size() > 0:
+			display_info["installed_paths"] = registry_paths
 		elif info.has("installed_path"):
 			display_info["installed_paths"] = [info.get("installed_path")]
 
-	var icon_tex = _icon_cache.get(info.get("icon_url", ""), _default_icon)
+	# Get installed version from registry (not from info, which may be stale for favorites)
+	# This must be done BEFORE dialog.setup() so the correct version is displayed
+	var installed_version = ""
+	if is_installed and _installed_registry.has(asset_id):
+		var entry = _installed_registry[asset_id]
+		var stored_info = entry.get("info", {}) if entry is Dictionary else {}
+		var stored_version = stored_info.get("version", "")
+		var paths = entry.get("paths", []) if entry is Dictionary else []
+		var local_version = _get_local_version(paths[0]) if paths.size() > 0 else ""
+
+		# Use the higher version (same logic as _show_installed)
+		if not stored_version.is_empty() and not local_version.is_empty():
+			if _compare_versions(stored_version, local_version) > 0:
+				installed_version = stored_version
+			else:
+				installed_version = local_version
+		elif not local_version.is_empty():
+			installed_version = local_version
+		elif not stored_version.is_empty():
+			installed_version = stored_version
+
+	# Fallback to info version if not in registry
+	if installed_version.is_empty():
+		installed_version = info.get("version", "")
+
+	# Update display_info with the correct installed version for Favorites/GlobalFolder items
+	if is_installed and not installed_version.is_empty():
+		display_info["version"] = installed_version
+
+	# Get icon - for GlobalFolder items installed, use the godotpackage icon
+	var icon_tex: Texture2D = null
+	var godotpackage_path = info.get("godotpackage_path", "")
+	if not godotpackage_path.is_empty() and FileAccess.file_exists(godotpackage_path):
+		icon_tex = _extract_icon_from_godotpackage(godotpackage_path)
+	if icon_tex == null:
+		icon_tex = _icon_cache.get(info.get("icon_url", ""), _default_icon)
 
 	dialog.setup(display_info, is_fav, is_installed, icon_tex)
 
@@ -3788,7 +4069,23 @@ func _on_asset_clicked(info: Dictionary) -> void:
 	dialog.uninstall_requested.connect(_on_uninstall_requested)
 	dialog.favorite_toggled.connect(_on_dialog_favorite_toggled)
 	dialog.add_to_global_folder_requested.connect(_on_add_to_global_folder_from_installed)
+	dialog.update_requested.connect(_on_update_requested.bind(dialog))
+
+	var has_update = is_installed and _has_update_available(asset_id, installed_version)
+	if has_update:
+		var update_info = _get_update_info(asset_id)
+		var latest_version = update_info.get("latest_version", "")
+		# Always show update button in dialog
+		dialog.set_update_available(true, latest_version)
+
 	dialog.popup_centered()
+
+	# Show update popup only if not ignored
+	if has_update:
+		var update_info = _get_update_info(asset_id)
+		var latest_version = update_info.get("latest_version", "")
+		if not _is_update_ignored(asset_id, latest_version):
+			call_deferred("_show_update_prompt", display_info, dialog)
 
 
 func _on_favorite_clicked(info: Dictionary) -> void:
@@ -3849,20 +4146,60 @@ func _on_install_requested(info: Dictionary) -> void:
 	install_dialog.setup(info)
 	var asset_id = info.get("asset_id", "")
 	install_dialog.installation_complete.connect(func(success, paths: Array, tracked_uids: Array):
+		SettingsDialog.debug_print("installation_complete callback received: success=%s, paths=%s" % [success, str(paths)])
 		if success:
 			# Track paths installed this session
 			for p in paths:
 				if p not in _session_installed_paths:
 					_session_installed_paths.append(p)
 			# Register the installed addon with its actual paths, UIDs, and full asset info
-			if paths.size() > 0 and not asset_id.is_empty():
-				_register_installed_addon(asset_id, paths, info, tracked_uids)
+			if paths.size() > 0:
+				# Generate asset_id if missing
+				var reg_asset_id = asset_id
+				if reg_asset_id.is_empty():
+					reg_asset_id = "installed_%d" % Time.get_unix_time_from_system()
+				SettingsDialog.debug_print("Registering addon: %s with paths %s" % [reg_asset_id, str(paths)])
+				_register_installed_addon(reg_asset_id, paths, info, tracked_uids)
+				# Update card badge
+				_update_card_installed_status(reg_asset_id, true)
+				# Clear update cache for this asset (so it doesn't show "Update Available" after updating)
+				if _update_cache.has(reg_asset_id):
+					_update_cache.erase(reg_asset_id)
+					_save_update_cache()
+				# Delete pending file since callback worked
+				var pending_path = "user://assetplus_pending_install.cfg"
+				if FileAccess.file_exists(pending_path):
+					DirAccess.remove_absolute(ProjectSettings.globalize_path(pending_path))
+					SettingsDialog.debug_print("Deleted pending installation file (callback worked)")
 			if _current_detail_dialog and is_instance_valid(_current_detail_dialog):
 				_current_detail_dialog.set_installed(true, paths)
-			# Update card badge
-			_update_card_installed_status(asset_id, true)
+			# Refresh installed tab to update version and remove update badge (with delay to ensure filesystem is updated)
+			if _current_tab == Tab.INSTALLED:
+				await get_tree().create_timer(0.5).timeout
+				_show_installed()
 	)
 	install_dialog.popup_centered()
+
+
+func _on_update_requested(info: Dictionary, detail_dialog: AcceptDialog = null) -> void:
+	## Handle update request from detail dialog's Update button
+	var asset_id = info.get("asset_id", "")
+	var update_info = _get_update_info(asset_id)
+	if update_info.is_empty():
+		return
+
+	var latest_version = update_info.get("latest_version", "")
+	var download_url = update_info.get("download_url", "")
+
+	# Clear any ignored update for this asset
+	_clear_ignored_update(asset_id)
+
+	# Close detail dialog if provided
+	if is_instance_valid(detail_dialog):
+		detail_dialog.hide()
+
+	# Start the update process
+	_perform_addon_update(info, latest_version, download_url)
 
 
 func _on_uninstall_requested(info: Dictionary) -> void:
@@ -4914,11 +5251,14 @@ func _process_filesystem_change() -> void:
 	## Process filesystem changes after debounce period
 	_filesystem_change_pending = false
 
+	# Try to recover any pending installations (may have been created before script reload)
+	var recovered = _recover_pending_installation()
+
 	# Check if any installed plugins were moved or deleted
 	var registry_changed = _cleanup_installed_registry()
 
-	# If registry changed, refresh the current view if relevant
-	if registry_changed:
+	# If registry changed or we recovered, refresh the current view if relevant
+	if registry_changed or recovered:
 		if _current_tab == Tab.INSTALLED or _current_tab == Tab.FAVORITES or _current_tab == Tab.GLOBAL_FOLDER:
 			SettingsDialog.debug_print_verbose("Refreshing current tab after filesystem change")
 			_refresh_content()
@@ -4931,10 +5271,12 @@ func set_panel_visible(is_visible: bool) -> void:
 	# If becoming visible and we have pending filesystem changes, process them now
 	if is_visible and _needs_filesystem_refresh:
 		_needs_filesystem_refresh = false
-		SettingsDialog.debug_print_verbose("Processing deferred filesystem changes")
+		SettingsDialog.debug_print_verbose("Processing deferred filesystem changes on tab switch")
+		# Try to recover any pending installations
+		var recovered = _recover_pending_installation()
 		# Process immediately (no debounce since changes already happened)
 		var registry_changed = _cleanup_installed_registry()
-		if registry_changed:
+		if registry_changed or recovered:
 			if _current_tab in [Tab.INSTALLED, Tab.FAVORITES, Tab.GLOBAL_FOLDER]:
 				_refresh_content()
 
@@ -5117,6 +5459,82 @@ func _register_installed_addon(asset_id: String, paths: Variant, asset_info: Dic
 	}
 	_save_installed_registry()
 
+	# Save version.cfg for assets without plugin.cfg (templates, etc.)
+	var version = asset_info.get("version", "")
+	var source = asset_info.get("source", "")
+	for p in paths_array:
+		_save_local_version(p, version, source)
+
+
+func _collect_missing_uids() -> void:
+	## Collect UIDs for installed assets that don't have them yet
+	## This handles assets installed during a session where script reload
+	## prevented the normal UID collection
+	var registry_changed = false
+
+	for asset_id in _installed_registry:
+		var entry = _installed_registry[asset_id]
+		if not entry is Dictionary:
+			continue
+
+		var uids = entry.get("uids", [])
+		var paths = _get_installed_addon_paths(asset_id)
+
+		# Skip if already has UIDs with actual values
+		var has_valid_uids = false
+		for uid_entry in uids:
+			if uid_entry is Dictionary and not uid_entry.get("uid", "").is_empty():
+				has_valid_uids = true
+				break
+
+		if has_valid_uids:
+			continue
+
+		# Collect UIDs for all files in the installed paths
+		var new_uids: Array = []
+		for addon_path in paths:
+			var files = _scan_directory_files(addon_path)
+			for file_path in files:
+				var uid = _get_file_uid_safe(file_path)
+				new_uids.append({"path": file_path, "uid": uid})
+
+		if new_uids.size() > 0:
+			entry["uids"] = new_uids
+			registry_changed = true
+			SettingsDialog.debug_print("Collected %d UIDs for %s" % [new_uids.size(), asset_id])
+
+	if registry_changed:
+		_save_installed_registry()
+
+
+func _scan_directory_files(dir_path: String) -> Array:
+	## Recursively scan a directory and return all file paths
+	var files: Array = []
+	var dir = DirAccess.open(dir_path)
+	if not dir:
+		return files
+
+	dir.list_dir_begin()
+	var file_name = dir.get_next()
+	while file_name != "":
+		if file_name != "." and file_name != "..":
+			var full_path = dir_path.path_join(file_name)
+			if dir.current_is_dir():
+				files.append_array(_scan_directory_files(full_path))
+			else:
+				files.append(full_path)
+		file_name = dir.get_next()
+	dir.list_dir_end()
+	return files
+
+
+func _get_file_uid_safe(file_path: String) -> String:
+	## Get UID for a file, returning empty string if not available
+	var uid_id = ResourceLoader.get_resource_uid(file_path)
+	if uid_id != ResourceUID.INVALID_ID:
+		return ResourceUID.id_to_text(uid_id)
+	return ""
+
 
 func _unregister_installed_addon(asset_id: String) -> void:
 	if _installed_registry.has(asset_id):
@@ -5254,8 +5672,27 @@ func _start_linkup_scan() -> void:
 
 			# Only process valid plugins
 			if FileAccess.file_exists(plugin_cfg_path):
-				# Skip if already in cache
-				if not _linkup_cache.has(folder_name):
+				# Skip if already in cache or in registry with a known source
+				var skip_linkup = _linkup_cache.has(folder_name)
+				if not skip_linkup:
+					# Check if this addon is already in registry with a store source
+					for asset_id in _installed_registry:
+						var entry = _installed_registry[asset_id]
+						if entry is Dictionary:
+							var paths = entry.get("paths", [])
+							if entry.has("path"):
+								paths = [entry["path"]]
+							for p in paths:
+								if p == addon_path or p.trim_suffix("/") == addon_path.trim_suffix("/"):
+									var info = entry.get("info", {})
+									var source = info.get("source", "")
+									if not source.is_empty() and source != "Local":
+										skip_linkup = true
+										SettingsDialog.debug_print_verbose("Linkup: '%s' already in registry from %s - skipping" % [folder_name, source])
+										break
+							if skip_linkup:
+								break
+				if not skip_linkup:
 					var cfg = ConfigFile.new()
 					var plugin_name = folder_name.replace("-", " ").replace("_", " ").capitalize()
 					var plugin_author = "Unknown"
@@ -5290,6 +5727,21 @@ func _on_refresh_linkup_pressed() -> void:
 
 func _try_linkup_plugin(folder_name: String, plugin_name: String, plugin_author: String, addon_path: String) -> void:
 	SettingsDialog.debug_print_verbose("Linkup: Checking '%s' (folder: %s)" % [plugin_name, folder_name])
+
+	# Skip if this addon is already in registry with a known store source (not Local)
+	for asset_id in _installed_registry:
+		var entry = _installed_registry[asset_id]
+		if entry is Dictionary:
+			var paths = entry.get("paths", [])
+			if entry.has("path"):
+				paths = [entry["path"]]
+			for p in paths:
+				if p == addon_path or p.trim_suffix("/") == addon_path.trim_suffix("/"):
+					var info = entry.get("info", {})
+					var source = info.get("source", "")
+					if not source.is_empty() and source != "Local":
+						SettingsDialog.debug_print_verbose("Linkup: '%s' already registered from %s - skipping" % [plugin_name, source])
+						return
 
 	# Skip if already in cache (matched or not)
 	if _linkup_cache.has(folder_name):
@@ -5562,3 +6014,693 @@ func _add_spaces_to_camelcase(name: String) -> String:
 				result += " "
 		result += c
 	return result
+
+
+func _is_assetplus(info: Dictionary) -> bool:
+	## Check if an asset is AssetPlus itself (to filter from stores or show specially)
+	var title = info.get("title", "").to_lower()
+	var asset_id = str(info.get("asset_id", ""))
+
+	# Check by asset_id if we know it
+	if not ASSETPLUS_ASSET_ID.is_empty() and asset_id == ASSETPLUS_ASSET_ID:
+		return true
+
+	# Check by name
+	for name_variant in ASSETPLUS_NAMES:
+		if title == name_variant or _normalize_name(title) == _normalize_name(name_variant):
+			return true
+
+	return false
+
+
+# ===== UPDATE CHECKING FOR INSTALLED ADDONS =====
+
+func _load_update_cache() -> void:
+	_update_cache.clear()
+	_ignored_updates.clear()
+	var config = ConfigFile.new()
+	if config.load(UPDATE_CACHE_PATH) == OK:
+		var data = config.get_value("updates", "cache", {})
+		if data is Dictionary:
+			_update_cache = data
+		var ignored = config.get_value("updates", "ignored", {})
+		if ignored is Dictionary:
+			_ignored_updates = ignored
+
+
+func _save_update_cache() -> void:
+	var config = ConfigFile.new()
+	config.set_value("updates", "cache", _update_cache)
+	config.set_value("updates", "ignored", _ignored_updates)
+	config.save(UPDATE_CACHE_PATH)
+
+
+func _is_update_ignored(asset_id: String, version: String) -> bool:
+	## Check if a specific update version is ignored for an asset
+	if not _ignored_updates.has(asset_id):
+		return false
+	return _ignored_updates[asset_id] == version
+
+
+func _ignore_update(asset_id: String, version: String) -> void:
+	## Mark a specific update version as ignored for an asset
+	_ignored_updates[asset_id] = version
+	_save_update_cache()
+	SettingsDialog.debug_print("Ignored update %s for asset %s" % [version, asset_id])
+
+
+func _clear_ignored_update(asset_id: String) -> void:
+	## Clear ignored update for an asset (e.g., when user manually updates)
+	if _ignored_updates.has(asset_id):
+		_ignored_updates.erase(asset_id)
+		_save_update_cache()
+
+
+func _recover_pending_installation() -> bool:
+	## Recover installation that was interrupted by script reload
+	## This handles the case where Godot reloads scripts after file changes,
+	## canceling the signal handler before it can register the installed addon
+	## Returns true if a recovery was performed (new install or update)
+	var pending_path = "user://assetplus_pending_install.cfg"
+	SettingsDialog.debug_print("Checking for pending installation at: %s" % pending_path)
+	if not FileAccess.file_exists(pending_path):
+		SettingsDialog.debug_print("No pending installation file found")
+		return false
+
+	SettingsDialog.debug_print("Found pending installation file, loading...")
+	var cfg = ConfigFile.new()
+	if cfg.load(pending_path) != OK:
+		SettingsDialog.debug_print("Failed to load pending installation file")
+		return false
+
+	var asset_id = cfg.get_value("pending", "asset_id", "")
+	var paths = cfg.get_value("pending", "paths", [])
+	var info = cfg.get_value("pending", "info", {})
+	var uids = cfg.get_value("pending", "uids", [])
+	var timestamp = cfg.get_value("pending", "timestamp", 0)
+
+	SettingsDialog.debug_print("Pending install: asset_id=%s, paths=%s, timestamp=%d" % [asset_id, str(paths), timestamp])
+
+	# Only recover if the pending install is recent (within last 60 seconds)
+	var current_time = int(Time.get_unix_time_from_system())
+	if current_time - timestamp > 60:
+		# Old pending file, just delete it
+		SettingsDialog.debug_print("Pending installation too old (%d seconds), deleting" % (current_time - timestamp))
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(pending_path))
+		return false
+
+	# Verify paths still exist
+	var valid_paths: Array = []
+	for p in paths:
+		var global_p = ProjectSettings.globalize_path(p) if p.begins_with("res://") else p
+		SettingsDialog.debug_print("Checking path: %s -> %s" % [p, global_p])
+		if p is String and DirAccess.dir_exists_absolute(global_p):
+			valid_paths.append(p)
+			SettingsDialog.debug_print("  Path exists!")
+		else:
+			SettingsDialog.debug_print("  Path does NOT exist")
+
+	if valid_paths.is_empty():
+		# Paths don't exist, delete pending file
+		SettingsDialog.debug_print("No valid paths found, deleting pending file")
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(pending_path))
+		return false
+
+	# Check if this is an update (asset already registered) or new install
+	var is_update = _installed_registry.has(asset_id)
+	if is_update:
+		SettingsDialog.debug_print("Asset already registered - this is an update, updating info...")
+		# Update the existing entry with new version info
+		var new_version = info.get("version", "")
+		if not new_version.is_empty():
+			var entry = _installed_registry[asset_id]
+			if entry is Dictionary:
+				var stored_info = entry.get("info", {})
+				stored_info["version"] = new_version
+				entry["info"] = stored_info
+				entry["paths"] = valid_paths
+				_installed_registry[asset_id] = entry
+				_save_installed_registry()
+				SettingsDialog.debug_print("Updated version to %s" % new_version)
+		# Clear update cache for this asset
+		if _update_cache.has(asset_id):
+			_update_cache.erase(asset_id)
+			_save_update_cache()
+	else:
+		# Register new installation
+		SettingsDialog.debug_print("Recovering pending installation: %s with paths %s" % [info.get("title", asset_id), str(valid_paths)])
+		_register_installed_addon(asset_id, valid_paths, info, uids)
+
+	# Track paths for session
+	for p in valid_paths:
+		if p not in _session_installed_paths:
+			_session_installed_paths.append(p)
+
+	# Delete the pending file
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(pending_path))
+	SettingsDialog.debug_print("Pending installation recovered successfully!")
+	return true
+
+
+func _check_addon_updates() -> void:
+	## Check for updates on all installed addons with a store source
+	SettingsDialog.debug_print("Checking for addon updates...")
+
+	var current_time = int(Time.get_unix_time_from_system())
+
+	for asset_id in _installed_registry:
+		var entry = _installed_registry[asset_id]
+		if not entry is Dictionary:
+			continue
+
+		var info: Dictionary = entry.get("info", {})
+		var source = info.get("source", "")
+
+		# Only check addons from stores
+		if source != SOURCE_GODOT and source != SOURCE_GODOT_BETA:
+			continue
+
+		# Skip if already pending
+		if _update_check_pending.has(asset_id):
+			continue
+
+		# Check cache - if recent enough, skip
+		if _update_cache.has(asset_id):
+			var cached = _update_cache[asset_id]
+			var checked_at = cached.get("checked_at", 0)
+			if current_time - checked_at < UPDATE_CACHE_TTL:
+				SettingsDialog.debug_print_verbose("Update check: Using cached data for %s" % asset_id)
+				continue
+
+		# Start update check
+		_update_check_pending[asset_id] = true
+		if source == SOURCE_GODOT:
+			_check_assetlib_update(asset_id, info)
+		elif source == SOURCE_GODOT_BETA:
+			_check_beta_update(asset_id, info)
+
+
+func _check_assetlib_update(asset_id: String, info: Dictionary) -> void:
+	## Check AssetLib for updates
+	var http = HTTPRequest.new()
+	add_child(http)
+
+	var url = "https://godotengine.org/asset-library/api/asset/%s" % asset_id
+	SettingsDialog.debug_print_verbose("Update check: Fetching AssetLib details for %s" % asset_id)
+
+	http.request_completed.connect(func(result, code, headers, body):
+		http.queue_free()
+		_on_assetlib_update_response(result, code, body, asset_id, info)
+	)
+	http.request(url)
+
+
+func _on_assetlib_update_response(result: int, code: int, body: PackedByteArray, asset_id: String, info: Dictionary) -> void:
+	_update_check_pending.erase(asset_id)
+
+	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+		SettingsDialog.debug_print_verbose("Update check: Failed to fetch AssetLib details for %s" % asset_id)
+		return
+
+	var json = JSON.new()
+	if json.parse(body.get_string_from_utf8()) != OK:
+		return
+
+	var data = json.data
+	if not data is Dictionary:
+		return
+
+	var latest_version = data.get("version_string", "")
+	var godot_version = data.get("godot_version", "")
+	var download_url = data.get("download_url", "")
+
+	# Store in cache
+	_update_cache[asset_id] = {
+		"latest_version": latest_version,
+		"godot_version": godot_version,
+		"download_url": download_url,
+		"checked_at": int(Time.get_unix_time_from_system())
+	}
+	_save_update_cache()
+
+	# Check if update is available
+	var installed_version = info.get("version", "").split(" | ")[0].strip_edges()  # Remove Godot version suffix
+	if not latest_version.is_empty() and latest_version != installed_version:
+		SettingsDialog.debug_print("Update available for %s: %s -> %s" % [info.get("title", asset_id), installed_version, latest_version])
+		# Refresh the installed tab to show the update badge
+		if _current_tab == Tab.INSTALLED:
+			call_deferred("_refresh_installed_cards")
+
+
+func _check_beta_update(asset_id: String, info: Dictionary) -> void:
+	## Check Godot Store Beta for updates
+	var browse_url = info.get("browse_url", "")
+	if browse_url.is_empty():
+		_update_check_pending.erase(asset_id)
+		return
+
+	var http = HTTPRequest.new()
+	add_child(http)
+
+	SettingsDialog.debug_print_verbose("Update check: Fetching Beta Store details for %s" % asset_id)
+
+	http.request_completed.connect(func(result, code, headers, body):
+		http.queue_free()
+		_on_beta_update_response(result, code, body, asset_id, info)
+	)
+	http.request(browse_url)
+
+
+func _on_beta_update_response(result: int, code: int, body: PackedByteArray, asset_id: String, info: Dictionary) -> void:
+	_update_check_pending.erase(asset_id)
+
+	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+		SettingsDialog.debug_print_verbose("Update check: Failed to fetch Beta Store details for %s" % asset_id)
+		return
+
+	var html = body.get_string_from_utf8()
+
+	# Parse publisher/slug from asset_id (format: publisher/slug)
+	var parts = asset_id.split("/")
+	var publisher = parts[0] if parts.size() > 0 else ""
+	var slug = parts[1] if parts.size() > 1 else ""
+
+	# Parse all versions from version-dropdown
+	# Format: <option data-id="702" data-version="3.0" ... data-min-display-version="4.0" data-max-display-version="4.6">
+	var all_versions: Array = []
+	var version_regex = RegEx.new()
+	version_regex.compile('<option[^>]*data-id="([^"]*)"[^>]*data-version="([^"]+)"[^>]*data-min-display-version="([^"]*)"[^>]*data-max-display-version="([^"]*)"')
+	var all_matches = version_regex.search_all(html)
+
+	SettingsDialog.debug_print_verbose("Update check: Found %d versions for %s" % [all_matches.size(), asset_id])
+
+	for m in all_matches:
+		var download_id = m.get_string(1)
+		var version = m.get_string(2)
+		var min_godot = m.get_string(3)
+		var max_godot = m.get_string(4)
+
+		# Format Godot version like in detail dialog: "4.0-4.6" or "4.0+"
+		var godot_display = ""
+		if min_godot != "Undefined" and max_godot != "Undefined":
+			godot_display = "%s-%s" % [min_godot, max_godot]
+		elif min_godot != "Undefined":
+			godot_display = "%s+" % min_godot
+		elif max_godot != "Undefined":
+			godot_display = "<=%s" % max_godot
+
+		var version_download_url = ""
+		if not download_id.is_empty() and not publisher.is_empty() and not slug.is_empty():
+			version_download_url = "https://store-beta.godotengine.org/asset/%s/%s/download/%s/" % [publisher, slug, download_id]
+
+		all_versions.append({
+			"version": version,
+			"godot_version": godot_display,
+			"download_url": version_download_url,
+			"download_id": download_id
+		})
+		SettingsDialog.debug_print_verbose("  Version %s (Godot %s, ID: %s)" % [version, godot_display, download_id])
+
+	if all_versions.is_empty():
+		SettingsDialog.debug_print_verbose("Update check: No versions found for %s" % asset_id)
+		return
+
+	var latest_version = all_versions[0].get("version", "")
+	var godot_version = all_versions[0].get("godot_version", "")
+	var download_url = all_versions[0].get("download_url", "")
+
+	# Store in cache
+	_update_cache[asset_id] = {
+		"latest_version": latest_version,
+		"godot_version": godot_version,
+		"download_url": download_url,
+		"versions": all_versions,
+		"checked_at": int(Time.get_unix_time_from_system())
+	}
+	_save_update_cache()
+
+	# Check if update is available
+	var installed_version = info.get("version", "").split(" | ")[0].strip_edges()
+	if not latest_version.is_empty() and latest_version != installed_version:
+		SettingsDialog.debug_print("Update available for %s: %s -> %s" % [info.get("title", asset_id), installed_version, latest_version])
+		if _current_tab == Tab.INSTALLED:
+			call_deferred("_refresh_installed_cards")
+
+
+func _has_update_available(asset_id: String, installed_version: String) -> bool:
+	## Check if an update is available for the given asset
+	if not _update_cache.has(asset_id):
+		return false
+
+	var cached = _update_cache[asset_id]
+	var latest_version = cached.get("latest_version", "")
+
+	if latest_version.is_empty():
+		return false
+
+	# Normalize versions for comparison (remove 'v' prefix, trim)
+	var norm_installed = installed_version.split(" | ")[0].strip_edges()
+	if norm_installed.begins_with("v"):
+		norm_installed = norm_installed.substr(1)
+
+	var norm_latest = latest_version.strip_edges()
+	if norm_latest.begins_with("v"):
+		norm_latest = norm_latest.substr(1)
+
+	return norm_latest != norm_installed and not norm_latest.is_empty()
+
+
+func _get_update_info(asset_id: String) -> Dictionary:
+	## Get update info for an asset (if available)
+	if _update_cache.has(asset_id):
+		return _update_cache[asset_id]
+	return {}
+
+
+func _get_local_version(addon_path: String) -> String:
+	## Get local installed version from plugin.cfg or version.cfg
+	## Returns empty string if no version found
+	## For templates, version.cfg may be in a subfolder (e.g., assets/)
+	if addon_path.is_empty():
+		return ""
+
+	var base_path = addon_path.trim_suffix("/")
+
+	# First try plugin.cfg (for plugins)
+	var plugin_cfg_path = base_path + "/plugin.cfg"
+	if FileAccess.file_exists(plugin_cfg_path):
+		var cfg = ConfigFile.new()
+		if cfg.load(plugin_cfg_path) == OK:
+			var version = cfg.get_value("plugin", "version", "")
+			if not version.is_empty():
+				return version
+
+	# Then try version.cfg at root (for non-plugin assets like templates)
+	var version_cfg_path = base_path + "/version.cfg"
+	if FileAccess.file_exists(version_cfg_path):
+		var cfg = ConfigFile.new()
+		if cfg.load(version_cfg_path) == OK:
+			var version = cfg.get_value("assetplus", "version", "")
+			if not version.is_empty():
+				return version
+
+	# For templates, version.cfg may be in a subfolder - check immediate subdirectories
+	var dir = DirAccess.open(base_path)
+	if dir:
+		dir.list_dir_begin()
+		var file_name = dir.get_next()
+		while file_name != "":
+			if dir.current_is_dir() and not file_name.begins_with("."):
+				var sub_version_cfg = base_path + "/" + file_name + "/version.cfg"
+				if FileAccess.file_exists(sub_version_cfg):
+					var cfg = ConfigFile.new()
+					if cfg.load(sub_version_cfg) == OK:
+						var version = cfg.get_value("assetplus", "version", "")
+						if not version.is_empty():
+							dir.list_dir_end()
+							return version
+			file_name = dir.get_next()
+		dir.list_dir_end()
+
+	return ""
+
+
+func _parse_godot_version_number(version_num: String) -> String:
+	## Convert Godot's internal version number (e.g., "40000300000") to readable format (e.g., "4.3")
+	## Format: major * 10000000000 + minor * 100000000 + patch * 1000000
+	## Examples: 40000300000 = 4.3.0, 40000400000 = 4.4.0, 40000000000 = 4.0.0
+	if version_num.is_empty():
+		return ""
+
+	# If it's already a readable version (contains "."), return as-is
+	if "." in version_num:
+		return version_num
+
+	# If it's not a valid number, return as-is
+	if not version_num.is_valid_int():
+		return version_num
+
+	var num = version_num.to_int()
+	if num < 10000000000:  # Not in the expected format
+		return version_num
+
+	var major = num / 10000000000
+	var remainder = num % 10000000000
+	var minor = remainder / 100000000
+	var patch = (remainder % 100000000) / 1000000
+
+	if patch > 0:
+		return "%d.%d.%d" % [major, minor, patch]
+	else:
+		return "%d.%d" % [major, minor]
+
+
+func _compare_versions(version_a: String, version_b: String) -> int:
+	## Compare two version strings
+	## Returns: >0 if a > b, <0 if a < b, 0 if equal
+	## Handles versions like "1.0.0", "0.10.1", "1.2.3-beta", etc.
+	if version_a == version_b:
+		return 0
+
+	# Extract only the numeric part (before any "-" suffix like "-beta", "-DEV", etc.)
+	var a_base = version_a.split("-")[0].strip_edges()
+	var b_base = version_b.split("-")[0].strip_edges()
+
+	# Split into parts
+	var a_parts = a_base.split(".")
+	var b_parts = b_base.split(".")
+
+	# Compare each part
+	var max_parts = maxi(a_parts.size(), b_parts.size())
+	for i in range(max_parts):
+		var a_val = 0
+		var b_val = 0
+
+		if i < a_parts.size() and a_parts[i].is_valid_int():
+			a_val = a_parts[i].to_int()
+		if i < b_parts.size() and b_parts[i].is_valid_int():
+			b_val = b_parts[i].to_int()
+
+		if a_val > b_val:
+			return 1
+		elif a_val < b_val:
+			return -1
+
+	# If numeric parts are equal, version without suffix is considered higher
+	# e.g., "1.0.0" > "1.0.0-beta"
+	var a_has_suffix = "-" in version_a
+	var b_has_suffix = "-" in version_b
+	if a_has_suffix and not b_has_suffix:
+		return -1
+	elif not a_has_suffix and b_has_suffix:
+		return 1
+
+	return 0
+
+
+func _save_local_version(addon_path: String, version: String, source: String = "") -> void:
+	## Save version info to version.cfg for assets without plugin.cfg
+	## This allows tracking updates for templates and non-plugin assets
+	if addon_path.is_empty():
+		return
+
+	# Skip if plugin.cfg exists (it already has version)
+	var plugin_cfg_path = addon_path.trim_suffix("/") + "/plugin.cfg"
+	if FileAccess.file_exists(plugin_cfg_path):
+		return
+
+	# Use "unknown" if version is empty (we still want to track the install)
+	var save_version = version if not version.is_empty() else "unknown"
+
+	# Create version.cfg
+	var version_cfg_path = addon_path.trim_suffix("/") + "/version.cfg"
+	var cfg = ConfigFile.new()
+	cfg.set_value("assetplus", "version", save_version)
+	cfg.set_value("assetplus", "installed_at", Time.get_unix_time_from_system())
+	if not source.is_empty():
+		cfg.set_value("assetplus", "source", source)
+
+	var err = cfg.save(version_cfg_path)
+	if err == OK:
+		SettingsDialog.debug_print("Saved version.cfg for %s (version: %s)" % [addon_path, save_version])
+	else:
+		SettingsDialog.debug_print("Failed to save version.cfg for %s: %d" % [addon_path, err])
+
+
+func _refresh_installed_cards() -> void:
+	## Refresh cards to show update badges without full reload
+	# For now, just reload the installed tab
+	if _current_tab == Tab.INSTALLED:
+		_show_installed()
+
+
+func _show_update_prompt(info: Dictionary, detail_dialog: AcceptDialog) -> void:
+	## Show an update prompt dialog when clicking on an addon with available update
+	var asset_id = info.get("asset_id", "")
+	var update_info = _get_update_info(asset_id)
+	if update_info.is_empty():
+		return
+
+	var installed_version = info.get("version", "").split(" | ")[0].strip_edges()
+	var installed_godot = ""
+	if " | Godot " in info.get("version", ""):
+		installed_godot = info.get("version", "").split(" | Godot ")[1].strip_edges()
+
+	var latest_version = update_info.get("latest_version", "")
+	var latest_godot = update_info.get("godot_version", "")
+
+	# Create update prompt dialog
+	var update_dialog = AcceptDialog.new()
+	update_dialog.title = "Update Available"
+	update_dialog.size = Vector2i(450, 280)
+	update_dialog.ok_button_text = "Update"
+	update_dialog.add_cancel_button("Later")
+
+	var main_vbox = VBoxContainer.new()
+	main_vbox.add_theme_constant_override("separation", 12)
+	update_dialog.add_child(main_vbox)
+
+	# Title
+	var title_label = Label.new()
+	title_label.text = "An update is available for %s" % info.get("title", "this addon")
+	title_label.add_theme_font_size_override("font_size", 15)
+	main_vbox.add_child(title_label)
+
+	# Separator
+	main_vbox.add_child(HSeparator.new())
+
+	# Version comparison grid
+	var grid = GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 20)
+	grid.add_theme_constant_override("v_separation", 8)
+	main_vbox.add_child(grid)
+
+	# Header row
+	var empty_label = Label.new()
+	empty_label.text = ""
+	grid.add_child(empty_label)
+
+	var version_header = Label.new()
+	version_header.text = "Version"
+	version_header.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	grid.add_child(version_header)
+
+	var godot_header = Label.new()
+	godot_header.text = "Godot"
+	godot_header.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	grid.add_child(godot_header)
+
+	# Current version row
+	var current_label = Label.new()
+	current_label.text = "Current:"
+	grid.add_child(current_label)
+
+	var current_version_label = Label.new()
+	current_version_label.text = installed_version if not installed_version.is_empty() else "-"
+	current_version_label.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
+	grid.add_child(current_version_label)
+
+	var current_godot_label = Label.new()
+	current_godot_label.text = installed_godot if not installed_godot.is_empty() else "-"
+	current_godot_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	grid.add_child(current_godot_label)
+
+	# New version row
+	var new_label = Label.new()
+	new_label.text = "New:"
+	grid.add_child(new_label)
+
+	var new_version_label = Label.new()
+	new_version_label.text = latest_version
+	new_version_label.add_theme_color_override("font_color", Color(0.5, 0.9, 0.5))
+	grid.add_child(new_version_label)
+
+	var new_godot_label = Label.new()
+	new_godot_label.text = latest_godot if not latest_godot.is_empty() else "-"
+	new_godot_label.add_theme_color_override("font_color", Color(0.5, 0.9, 0.5))
+	grid.add_child(new_godot_label)
+
+	# Warning if Godot version might be incompatible
+	var engine_version = Engine.get_version_info()
+	var current_godot_major = engine_version.get("major", 4)
+	var current_godot_minor = engine_version.get("minor", 0)
+	var current_godot_str = "%d.%d" % [current_godot_major, current_godot_minor]
+
+	if not latest_godot.is_empty() and latest_godot != current_godot_str:
+		main_vbox.add_child(HSeparator.new())
+		var warning_label = Label.new()
+		warning_label.text = "Note: This version targets Godot %s (you have %s)" % [latest_godot, current_godot_str]
+		warning_label.add_theme_color_override("font_color", Color(0.95, 0.7, 0.2))
+		warning_label.add_theme_font_size_override("font_size", 12)
+		warning_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+		main_vbox.add_child(warning_label)
+
+	# Add spacer
+	var spacer = Control.new()
+	spacer.custom_minimum_size = Vector2(0, 8)
+	main_vbox.add_child(spacer)
+
+	# "Don't show again" checkbox
+	var dont_show_check = CheckBox.new()
+	dont_show_check.text = "Don't show this again for this addon"
+	dont_show_check.add_theme_font_size_override("font_size", 12)
+	dont_show_check.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	main_vbox.add_child(dont_show_check)
+
+	# Handle update confirmation
+	update_dialog.confirmed.connect(func():
+		update_dialog.queue_free()
+		# Clear ignored update when user chooses to update
+		_clear_ignored_update(asset_id)
+		# Close detail dialog too
+		if is_instance_valid(detail_dialog):
+			detail_dialog.hide()
+		# Start the update process
+		_perform_addon_update(info, latest_version, update_info.get("download_url", ""))
+	)
+
+	update_dialog.canceled.connect(func():
+		# If "don't show again" is checked, ignore this update version
+		if dont_show_check.button_pressed:
+			_ignore_update(asset_id, latest_version)
+		update_dialog.queue_free()
+	)
+
+	EditorInterface.get_base_control().add_child(update_dialog)
+	update_dialog.popup_centered()
+
+
+func _perform_addon_update(info: Dictionary, target_version: String, download_url: String) -> void:
+	## Perform the addon update by downloading and installing the new version
+	var asset_id = info.get("asset_id", "")
+	var source = info.get("source", "")
+
+	SettingsDialog.debug_print("Starting update for %s to version %s" % [info.get("title", asset_id), target_version])
+
+	# If no download URL in cache, fetch it
+	if download_url.is_empty():
+		var update_info = _get_update_info(asset_id)
+		download_url = update_info.get("download_url", "")
+
+	if download_url.is_empty():
+		_show_message("Could not find download URL for update. Please try reinstalling manually.")
+		return
+
+	# Get current installed paths from registry (in case asset was moved)
+	var current_paths = _get_installed_addon_paths(asset_id)
+	var update_target_path = ""
+	if current_paths.size() > 0:
+		# Use the exact current installation path - install_dialog will replace this folder
+		update_target_path = current_paths[0]
+		SettingsDialog.debug_print("Update will replace existing installation at: %s" % update_target_path)
+
+	# Create updated info with the download URL
+	var update_asset_info = info.duplicate()
+	update_asset_info["download_url"] = download_url
+	update_asset_info["version"] = target_version
+	if not update_target_path.is_empty():
+		update_asset_info["update_target_path"] = update_target_path
+
+	# Use the existing install flow (which will overwrite the current installation)
+	_on_install_requested(update_asset_info)

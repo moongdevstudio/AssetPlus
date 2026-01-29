@@ -17,6 +17,7 @@ var _license_label: Label
 var _favorite_btn: Button
 var _bg_panel: Panel
 var _installed_badge: Label
+var _update_badge: Label
 var _plugin_toggle_btn: Button
 
 var _info: Dictionary = {}
@@ -26,6 +27,7 @@ var _is_selected: bool = false
 var _is_installed: bool = false
 var _is_plugin: bool = false
 var _is_plugin_enabled: bool = false
+var _has_update: bool = false
 
 
 func _init() -> void:
@@ -171,6 +173,27 @@ func _build_ui() -> void:
 	badge_style.content_margin_bottom = 2
 	_installed_badge.add_theme_stylebox_override("normal", badge_style)
 
+	# Update available badge
+	_update_badge = Label.new()
+	_update_badge.text = "Update"
+	_update_badge.add_theme_font_size_override("font_size", 10)
+	_update_badge.add_theme_color_override("font_color", Color(0.15, 0.15, 0.15))
+	_update_badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_update_badge.mouse_filter = Control.MOUSE_FILTER_PASS
+	_update_badge.visible = false
+	_update_badge.tooltip_text = "An update is available"
+	right_vbox.add_child(_update_badge)
+
+	# Style the update badge with orange background
+	var update_badge_style = StyleBoxFlat.new()
+	update_badge_style.bg_color = Color(0.95, 0.7, 0.2)
+	update_badge_style.set_corner_radius_all(3)
+	update_badge_style.content_margin_left = 4
+	update_badge_style.content_margin_right = 4
+	update_badge_style.content_margin_top = 2
+	update_badge_style.content_margin_bottom = 2
+	_update_badge.add_theme_stylebox_override("normal", update_badge_style)
+
 	# Favorite button
 	_favorite_btn = Button.new()
 	_favorite_btn.text = "♡"
@@ -264,6 +287,9 @@ func _update_display() -> void:
 		"Installed":
 			_source_badge.text = "Installed"
 			_source_badge.add_theme_color_override("font_color", Color(0.5, 0.7, 0.5))
+		"This Plugin":
+			_source_badge.text = "This Plugin"
+			_source_badge.add_theme_color_override("font_color", Color(0.7, 0.5, 0.9))
 		_:
 			_source_badge.text = source
 			_source_badge.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
@@ -292,6 +318,11 @@ func set_favorite(is_fav: bool) -> void:
 	_update_favorite_display()
 
 
+func set_favorite_visible(visible: bool) -> void:
+	if _favorite_btn:
+		_favorite_btn.visible = visible
+
+
 func is_favorite() -> bool:
 	return _is_favorite
 
@@ -309,6 +340,19 @@ func set_installed(is_inst: bool) -> void:
 
 func is_installed() -> bool:
 	return _is_installed
+
+
+func set_update_available(has_update: bool, new_version: String = "") -> void:
+	_has_update = has_update
+	if _update_badge:
+		_update_badge.visible = has_update
+		if has_update and not new_version.is_empty():
+			_update_badge.text = "Update"
+			_update_badge.tooltip_text = "Update available: %s" % new_version
+
+
+func has_update_available() -> bool:
+	return _has_update
 
 
 func set_plugin_visible(visible: bool) -> void:

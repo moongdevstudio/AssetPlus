@@ -25,9 +25,10 @@
 | **Multi-Source Browser** | Search Godot AssetLib, Godot Store Beta & Godot Shaders in one place |
 | **One-Click Install** | Install addons, templates, or full demo projects with selective import |
 | **Installed Tracking** | See all addons in your project with source matching |
+| **Addon Updates** | Get notified when updates are available for your installed addons |
 | **Global Library** | Build a personal collection of reusable assets as `.godotpackage` files |
 | **Favorites Sync** | Save favorites, synced across all projects |
-| **Auto-Update** | Get notified of new versions automatically |
+| **Auto-Update** | AssetPlus updates itself automatically |
 
 ### Browse Multiple Sources
 - **Godot AssetLib** - Official Godot Asset Library
@@ -50,8 +51,14 @@ Similar to Unity's package import, you get full control when installing template
 
 <img src="screens/installfiletreescreenshot.png" width="500">
 
+### Addon Updates
+Keep your installed addons up to date:
+- Automatic update detection for addons from AssetLib and Godot Store Beta
+- Update badges on cards and in detail view
+- One-click update installation
+
 ### Auto-Update
-AssetPlus checks for updates at startup and notifies you when a new version is available. Install updates with one click, or disable auto-update in Settings.
+AssetPlus checks for its own updates at startup and notifies you when a new version is available. Install updates with one click, or disable auto-update in Settings.
 
 ## Installation
 
