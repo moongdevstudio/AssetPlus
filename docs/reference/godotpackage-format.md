@@ -98,7 +98,30 @@ Use AssetPlus to create packages:
 1. Right-click a folder in FileSystem
 2. Select **Export as .godotpackage**
 3. Fill in metadata
-4. Export
+4. Choose an icon (optional)
+5. Export
+
+## Editing Packages
+
+You can edit package metadata after creation:
+
+1. Open the **Global** tab
+2. Click on a package to open details
+3. Click **Edit Info**
+
+### Editable Fields
+
+| Field | Description |
+|-------|-------------|
+| Name | Display name of the package |
+| Author | Creator's name |
+| Version | Package version |
+| Category | Package type (Plugin, Asset, Template) |
+| License | License type |
+| Description | What the package does |
+| Icon | Package icon (128x128, PNG/JPG) |
+
+Changes are saved directly to the `.godotpackage` file.
 
 ## Installing Packages
 
@@ -107,6 +130,14 @@ Use AssetPlus to create packages:
 3. Click **Install**
 
 The package contents are extracted to your project, and input actions/autoloads are configured automatically.
+
+## Extracting Packages
+
+To extract a package to a folder (without installing):
+
+1. Click on a package in the Global tab
+2. Click **Extract to Folder**
+3. Choose destination
 
 ## Checksum Verification
 
