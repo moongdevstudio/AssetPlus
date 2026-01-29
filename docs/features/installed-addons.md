@@ -21,6 +21,20 @@ AssetPlus tries to match your installed addons with their online sources. When a
 - View the original asset page
 - Compare versions
 
+## Update Detection
+
+AssetPlus automatically checks for updates to your installed addons:
+
+- **Update Badge** - Cards show an orange "Update" badge when a new version is available
+- **Detail View** - The update button shows the new version number
+- **One-Click Update** - Click the Update button to download and install the latest version
+
+Updates are checked for addons installed from:
+
+- Godot AssetLib
+- Godot Store Beta
+- Global Folder packages (if they have an original source)
+
 ## Addon Information
 
 Each installed addon card shows:
