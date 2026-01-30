@@ -57,6 +57,17 @@ Click on any addon to open its detail view with options:
 !!! warning "Uninstall"
     Uninstalling an addon deletes its entire folder. Make sure you don't have any modified files you want to keep.
 
+## GDExtension Support
+
+Addons with native libraries (GDExtensions) require special handling:
+
+- **Installation** - GDExtension files are detected and installed normally. Godot may need a restart to load them.
+- **Uninstallation** - Native libraries (.dll/.so) are locked while Godot runs. AssetPlus uses **deferred deletion**:
+  1. The `.gdextension` file is emptied (prevents loading on restart)
+  2. On next Godot restart, files are fully deleted
+
+This prevents crashes when uninstalling addons with native code.
+
 ## Refreshing
 
 The addon list refreshes automatically when:

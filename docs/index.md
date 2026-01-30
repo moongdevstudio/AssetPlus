@@ -10,8 +10,12 @@ A unified asset browser for Godot 4.x that brings together multiple asset source
 
 | Feature | Description |
 |---------|-------------|
+| **Home Page** | Modern landing page with latest & most liked assets by category |
 | **Multi-Source Browser** | Search Godot AssetLib, Godot Store Beta & Godot Shaders in one place |
+| **Likes System** | Like assets and discover what's popular - synced to cloud |
 | **One-Click Install** | Install any asset directly into your project |
+| **GDExtension Support** | Safe handling of addons with native libraries |
+| **Image Gallery** | Full-screen viewer for asset screenshots |
 | **Installed Tracking** | See all addons in your project with source matching |
 | **Global Library** | Build a personal collection of reusable assets |
 | **Favorites Sync** | Save favorites, synced across all projects |
