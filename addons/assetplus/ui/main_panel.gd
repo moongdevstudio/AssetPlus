@@ -92,6 +92,9 @@ var _github_url_edit: LineEdit
 var _github_http: HTTPRequest
 var _github_progress_dialog: AcceptDialog
 var _github_progress_label: Label
+var _github_progress_bar: ProgressBar
+var _github_expected_size: int = 0  # Expected size in bytes
+var _github_download_timer: Timer
 
 var _page_buttons: Array[Button] = []
 
@@ -157,6 +160,9 @@ var _filter_selected_category: String = "All"
 var _filter_selected_source: String = "All"
 var _available_categories: Array[String] = []
 var _available_sources: Array[String] = []
+
+# Shaders attribution label
+var _shaders_attribution: RichTextLabel = null
 
 # Home page state
 var _home_container: VBoxContainer = null
@@ -463,6 +469,9 @@ func _setup_ui() -> void:
 	# Setup filter bar for Installed/Favorites tabs
 	_setup_filter_bar()
 
+	# Setup Godot Shaders attribution label
+	_setup_shaders_attribution()
+
 
 func _setup_filter_bar() -> void:
 	# Connect filter signals
@@ -471,6 +480,37 @@ func _setup_filter_bar() -> void:
 
 	# Initial population (will be updated when switching tabs)
 	_update_filter_options()
+
+
+func _setup_shaders_attribution() -> void:
+	## Create the Godot Shaders attribution label (shown when viewing shaders)
+	_shaders_attribution = RichTextLabel.new()
+	_shaders_attribution.bbcode_enabled = true
+	_shaders_attribution.fit_content = true
+	_shaders_attribution.scroll_active = false
+	_shaders_attribution.selection_enabled = false
+	_shaders_attribution.mouse_filter = Control.MOUSE_FILTER_PASS
+	_shaders_attribution.text = "[center]Shaders from Godot Shaders ([url=https://godotshaders.com]godotshaders.com[/url])[/center]"
+	_shaders_attribution.add_theme_font_size_override("normal_font_size", 12)
+	_shaders_attribution.add_theme_color_override("default_color", Color(0.6, 0.6, 0.65))
+	_shaders_attribution.visible = false
+	_shaders_attribution.custom_minimum_size.y = 24
+
+	# Connect URL click
+	_shaders_attribution.meta_clicked.connect(func(meta):
+		OS.shell_open(str(meta))
+	)
+
+	# Insert after TabsSeparator
+	var vbox = $VBox
+	var separator_idx = -1
+	for i in vbox.get_child_count():
+		if vbox.get_child(i).name == "TabsSeparator":
+			separator_idx = i
+			break
+	if separator_idx >= 0:
+		vbox.add_child(_shaders_attribution)
+		vbox.move_child(_shaders_attribution, separator_idx + 1)
 
 
 func _setup_help_button() -> void:
@@ -1566,11 +1606,12 @@ func _on_github_repo_info_received(result: int, code: int, headers: PackedString
 	var stars = data.get("stargazers_count", 0)
 	var license_info = data.get("license", {})
 	var license_name = license_info.get("spdx_id", "Unknown") if license_info else "Unknown"
+	var repo_size_kb = data.get("size", 0)  # Size in KB from GitHub API
 
 	# Download the ZIP of the default branch
 	var download_url = "https://github.com/%s/%s/archive/refs/heads/%s.zip" % [owner, repo, default_branch]
 
-	SettingsDialog.debug_print(" Downloading %s (branch: %s)" % [repo_full_name, default_branch])
+	SettingsDialog.debug_print(" Downloading %s (branch: %s, size: %d KB)" % [repo_full_name, default_branch, repo_size_kb])
 
 	# Store repo info for later
 	var repo_info = {
@@ -1581,7 +1622,8 @@ func _on_github_repo_info_received(result: int, code: int, headers: PackedString
 		"description": description,
 		"url": original_url,
 		"stars": stars,
-		"asset_id": "github_%s_%s" % [owner, repo]
+		"asset_id": "github_%s_%s" % [owner, repo],
+		"size_kb": repo_size_kb  # Store size for progress calculation
 	}
 
 	_download_github_repo(download_url, repo_info, default_branch)
@@ -1593,6 +1635,10 @@ func _download_github_repo(download_url: String, repo_info: Dictionary, branch: 
 	if _github_http:
 		_github_http.cancel_request()
 		_github_http.queue_free()
+
+	# Store expected size (GitHub API size is in KB, ZIP is typically ~50-70% of repo size)
+	var size_kb = repo_info.get("size_kb", 0)
+	_github_expected_size = size_kb * 1024 * 0.6  # Estimate ZIP size as 60% of repo size
 
 	# Show progress dialog
 	_show_github_progress_dialog(repo_info.get("title", "GitHub Repository"))
@@ -1634,29 +1680,88 @@ func _show_github_progress_dialog(repo_name: String) -> void:
 	_github_progress_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(_github_progress_label)
 
-	var progress_bar = ProgressBar.new()
-	progress_bar.custom_minimum_size.x = 300
-	progress_bar.max_value = 100
-	progress_bar.value = 0
-	progress_bar.name = "ProgressBar"
-	# Indeterminate style - just animate
-	vbox.add_child(progress_bar)
+	_github_progress_bar = ProgressBar.new()
+	_github_progress_bar.custom_minimum_size.x = 300
+	_github_progress_bar.max_value = 100
+	_github_progress_bar.value = 0
+	vbox.add_child(_github_progress_bar)
 
-	# Animate progress bar
-	var tween = create_tween()
-	tween.set_loops()
-	tween.tween_property(progress_bar, "value", 100, 1.5)
-	tween.tween_property(progress_bar, "value", 0, 0.0)
+	# Start timer to update progress
+	if _github_download_timer:
+		_github_download_timer.queue_free()
+	_github_download_timer = Timer.new()
+	_github_download_timer.wait_time = 0.1
+	_github_download_timer.timeout.connect(_update_github_download_progress)
+	add_child(_github_download_timer)
+	_github_download_timer.start()
+
+	# Connect close signal to cancel download
+	_github_progress_dialog.canceled.connect(_on_github_download_canceled)
 
 	EditorInterface.get_base_control().add_child(_github_progress_dialog)
 	_github_progress_dialog.popup_centered()
 
 
+func _update_github_download_progress() -> void:
+	if not _github_http or not _github_progress_bar:
+		return
+
+	var downloaded = _github_http.get_downloaded_bytes()
+	var total = _github_http.get_body_size()
+
+	# Use server-provided size if available, otherwise use our estimate
+	if total <= 0 and _github_expected_size > 0:
+		total = _github_expected_size
+
+	if total > 0 and downloaded > 0:
+		var percent = minf((float(downloaded) / total) * 100.0, 99.0)  # Cap at 99% until complete
+		# Only go forward, never backward
+		if percent > _github_progress_bar.value:
+			_github_progress_bar.value = percent
+		if _github_progress_label:
+			_github_progress_label.text = "Downloading: %s / %s" % [_format_size_simple(downloaded), _format_size_simple(int(total))]
+	elif downloaded > 0:
+		# Unknown size - show bytes downloaded
+		if _github_progress_label:
+			_github_progress_label.text = "Downloading: %s..." % _format_size_simple(downloaded)
+		if _github_progress_bar.value < 50:
+			_github_progress_bar.value += 0.5  # Slow animation
+
+
+func _format_size_simple(bytes: int) -> String:
+	if bytes < 1024:
+		return "%d B" % bytes
+	elif bytes < 1024 * 1024:
+		return "%.1f KB" % (bytes / 1024.0)
+	else:
+		return "%.2f MB" % (bytes / (1024.0 * 1024.0))
+
+
+func _on_github_download_canceled() -> void:
+	## Called when user closes the GitHub download dialog - cancel the download
+	SettingsDialog.debug_print("GitHub download canceled by user")
+	_cancel_github_download()
+	_hide_github_progress_dialog()
+
+
+func _cancel_github_download() -> void:
+	## Cancel ongoing GitHub download
+	if _github_http:
+		_github_http.cancel_request()
+		_github_http.queue_free()
+		_github_http = null
+
+
 func _hide_github_progress_dialog() -> void:
+	if _github_download_timer:
+		_github_download_timer.stop()
+		_github_download_timer.queue_free()
+		_github_download_timer = null
 	if _github_progress_dialog and is_instance_valid(_github_progress_dialog):
 		_github_progress_dialog.queue_free()
 		_github_progress_dialog = null
 		_github_progress_label = null
+		_github_progress_bar = null
 
 
 func _on_github_download_complete(result: int, code: int, temp_path: String, repo_info: Dictionary, branch: String) -> void:
@@ -1679,7 +1784,18 @@ func _on_github_download_complete(result: int, code: int, temp_path: String, rep
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(temp_path))
 		return
 
-	SettingsDialog.debug_print(" GitHub download complete, opening install dialog...")
+	SettingsDialog.debug_print(" GitHub download complete, extracting README...")
+
+	# Extract README and icon from the ZIP
+	var extracted = _extract_github_readme_and_icon(temp_path, repo_info, branch)
+	if not extracted.get("description", "").is_empty():
+		repo_info["description"] = extracted["description"]
+	if extracted.get("icon_texture"):
+		repo_info["_icon_texture"] = extracted["icon_texture"]
+	if not extracted.get("icon_url", "").is_empty():
+		repo_info["icon_url"] = extracted["icon_url"]
+
+	SettingsDialog.debug_print(" Opening install dialog...")
 
 	# Open InstallDialog with the downloaded ZIP
 	var global_path = ProjectSettings.globalize_path(temp_path)
@@ -1709,6 +1825,181 @@ func _on_github_download_complete(result: int, code: int, temp_path: String, rep
 			_queue_safe_scan()
 	)
 	install_dialog.popup_centered()
+
+
+func _extract_github_readme_and_icon(zip_path: String, repo_info: Dictionary, branch: String) -> Dictionary:
+	## Extract README content and first image from a GitHub ZIP
+	## Returns { "description": String, "icon_texture": Texture2D or null, "icon_url": String }
+	var result = {"description": "", "icon_texture": null, "icon_url": ""}
+
+	var zip_reader = ZIPReader.new()
+	var err = zip_reader.open(zip_path)
+	if err != OK:
+		SettingsDialog.debug_print_verbose(" Failed to open ZIP for README extraction")
+		return result
+
+	var files = zip_reader.get_files()
+
+	# GitHub ZIPs have a root folder like "repo-branch/"
+	var owner = repo_info.get("author", "")
+	var repo_name = repo_info.get("title", "")
+	var zip_root = "%s-%s/" % [repo_name, branch]
+
+	# Find README.md (case-insensitive)
+	var readme_path = ""
+	for file_path in files:
+		var lower_path = file_path.to_lower()
+		# Check for README at root of the repo (inside the zip root folder)
+		if lower_path.ends_with("readme.md"):
+			var parts = file_path.split("/")
+			# Should be like "repo-branch/README.md" (2 parts)
+			if parts.size() == 2:
+				readme_path = file_path
+				break
+
+	if readme_path.is_empty():
+		SettingsDialog.debug_print_verbose(" No README.md found in ZIP")
+		zip_reader.close()
+		return result
+
+	# Read README content
+	var readme_content = zip_reader.read_file(readme_path).get_string_from_utf8()
+	if readme_content.is_empty():
+		zip_reader.close()
+		return result
+
+	SettingsDialog.debug_print_verbose(" Found README.md (%d chars)" % readme_content.length())
+
+	# Use README as description (truncate if too long)
+	# Remove badges and HTML tags for cleaner display
+	var clean_readme = _clean_readme_for_description(readme_content)
+	result["description"] = clean_readme
+
+	# Find first image in README (for icon)
+	var image_url = _find_first_image_in_readme(readme_content, owner, repo_name, branch)
+	if not image_url.is_empty():
+		SettingsDialog.debug_print_verbose(" Found image URL in README: %s" % image_url)
+		# Check if it's a relative path (image in the repo)
+		if not image_url.begins_with("http"):
+			# Try to load from ZIP
+			var image_path_in_zip = zip_root + image_url.lstrip("./")
+			if image_path_in_zip in files:
+				var image_data = zip_reader.read_file(image_path_in_zip)
+				var tex = _load_texture_from_data(image_data, image_url)
+				if tex:
+					result["icon_texture"] = tex
+					SettingsDialog.debug_print_verbose(" Loaded icon from ZIP: %s" % image_path_in_zip)
+			else:
+				# Convert to absolute URL for later download
+				var abs_url = "https://raw.githubusercontent.com/%s/%s/%s/%s" % [owner, repo_name, branch, image_url.lstrip("./")]
+				result["icon_url"] = abs_url
+		else:
+			# External URL - store for later download
+			result["icon_url"] = image_url
+
+	zip_reader.close()
+	return result
+
+
+func _clean_readme_for_description(readme: String) -> String:
+	## Clean README content for use as description
+	## Remove badges, HTML, and excessive whitespace
+
+	# Remove HTML comments
+	var comment_regex = RegEx.new()
+	comment_regex.compile("<!--[\\s\\S]*?-->")
+	readme = comment_regex.sub(readme, "", true)
+
+	# Remove badge images (usually at the top)
+	var badge_regex = RegEx.new()
+	badge_regex.compile("\\[!\\[[^\\]]*\\]\\([^)]*\\)\\]\\([^)]*\\)")
+	readme = badge_regex.sub(readme, "", true)
+
+	# Remove standalone badge images
+	var img_badge_regex = RegEx.new()
+	img_badge_regex.compile("!\\[[^\\]]*\\]\\(https?://[^)]*(?:badge|shield|img\\.shields)[^)]*\\)")
+	readme = img_badge_regex.sub(readme, "", true)
+
+	# Remove HTML tags
+	var html_regex = RegEx.new()
+	html_regex.compile("<[^>]+>")
+	readme = html_regex.sub(readme, "", true)
+
+	# Remove multiple blank lines
+	var blank_regex = RegEx.new()
+	blank_regex.compile("\n{3,}")
+	readme = blank_regex.sub(readme, "\n\n", true)
+
+	# Trim and limit length
+	readme = readme.strip_edges()
+
+	# Truncate if too long (keep first ~2000 chars for description)
+	if readme.length() > 2000:
+		readme = readme.substr(0, 2000) + "..."
+
+	return readme
+
+
+func _find_first_image_in_readme(readme: String, owner: String, repo: String, branch: String) -> String:
+	## Find the first image URL in a README that looks like a screenshot
+	## Skip badges and small icons
+
+	# Pattern for markdown images: ![alt](url)
+	var img_regex = RegEx.new()
+	img_regex.compile("!\\[([^\\]]*)\\]\\(([^)]+)\\)")
+
+	var matches = img_regex.search_all(readme)
+	for m in matches:
+		var alt_text = m.get_string(1).to_lower()
+		var url = m.get_string(2)
+
+		# Skip badges and shields
+		if "badge" in url.to_lower() or "shield" in url.to_lower():
+			continue
+		if "img.shields.io" in url or "badgen.net" in url:
+			continue
+
+		# Skip tiny icons (usually have "icon" in alt or url)
+		if "icon" in alt_text and "screenshot" not in alt_text:
+			continue
+
+		# Prefer images with screenshot/preview/demo in name or alt
+		var is_screenshot = "screenshot" in alt_text or "preview" in alt_text or "demo" in alt_text
+		var is_screenshot_url = "screenshot" in url.to_lower() or "preview" in url.to_lower()
+
+		# Accept common image formats
+		var lower_url = url.to_lower()
+		if lower_url.ends_with(".png") or lower_url.ends_with(".jpg") or lower_url.ends_with(".jpeg") or lower_url.ends_with(".gif") or lower_url.ends_with(".webp") or is_screenshot or is_screenshot_url:
+			# Convert relative URLs to absolute GitHub raw URLs
+			if not url.begins_with("http"):
+				url = "https://raw.githubusercontent.com/%s/%s/%s/%s" % [owner, repo, branch, url.lstrip("./")]
+			return url
+
+	return ""
+
+
+func _load_texture_from_data(data: PackedByteArray, filename: String) -> Texture2D:
+	## Load a texture from raw image data
+	var image = Image.new()
+	var err: int
+
+	var lower_name = filename.to_lower()
+	if lower_name.ends_with(".png"):
+		err = image.load_png_from_buffer(data)
+	elif lower_name.ends_with(".jpg") or lower_name.ends_with(".jpeg"):
+		err = image.load_jpg_from_buffer(data)
+	elif lower_name.ends_with(".webp"):
+		err = image.load_webp_from_buffer(data)
+	else:
+		# Try PNG first, then JPG
+		err = image.load_png_from_buffer(data)
+		if err != OK:
+			err = image.load_jpg_from_buffer(data)
+
+	if err != OK:
+		return null
+
+	return ImageTexture.create_from_image(image)
 
 
 func _on_import_file_selected(path: String) -> void:
@@ -1899,6 +2190,11 @@ func _update_tab_buttons() -> void:
 	if _open_global_folder_btn:
 		_open_global_folder_btn.visible = _current_tab == Tab.GLOBAL_FOLDER
 
+	# Show Godot Shaders attribution only when viewing Godot Shaders source in Store tab
+	if _shaders_attribution:
+		var show_shaders_attr = _current_tab == Tab.STORE and _current_source == SOURCE_SHADERS
+		_shaders_attribution.visible = show_shaders_attr
+
 
 func _style_tab_button(btn: Button, is_selected: bool) -> void:
 	if is_selected:
@@ -2005,6 +2301,11 @@ func _on_filter_changed(_index: int) -> void:
 	_current_page = 0
 	# Update sort options based on category (hide Relevance when category is "All")
 	_update_sort_options_for_category()
+	# If switching to "All" category and search field is empty, clear the internal search query
+	# This ensures Home page shows (fixes bug where _search_query="*" from "See more" persists)
+	var selected_category = _category_filter.get_item_text(_category_filter.selected) if _category_filter.item_count > 0 else "All"
+	if selected_category == "All" and _search_edit.text.strip_edges().is_empty():
+		_search_query = ""
 	_search_assets()
 
 
@@ -2736,11 +3037,21 @@ func _on_home_most_liked_response(result: int, code: int, body: PackedByteArray,
 
 	SettingsDialog.debug_print("Home Most Liked section %s: received %d asset IDs" % [section_key, data.size()])
 
-	# Store asset IDs for this section
+	# Store asset IDs for this section and update likes cache with counts from API
 	var asset_ids: Array = []
+	var cache_updated = false
 	for item in data:
 		if item is Dictionary and item.has("id"):
-			asset_ids.append(item.get("id", ""))
+			var asset_id = str(item.get("id", ""))
+			asset_ids.append(asset_id)
+			# Update likes cache with the count from API response
+			if item.has("count"):
+				var like_count = int(item.get("count", 0))
+				_likes_cache[asset_id] = like_count
+				cache_updated = true
+
+	if cache_updated:
+		_save_likes_cache()
 
 	# Fetch details for each asset
 	_fetch_home_most_liked_details(section_key, asset_ids, cat_info, source)
@@ -2824,7 +3135,8 @@ func _on_home_most_liked_detail_response(result: int, code: int, body: PackedByt
 						"license": item.get("cost", "MIT"),
 						"cost": "Free",
 						"godot_version": item.get("godot_version", "4.0"),
-						"browse_url": "https://godotengine.org/asset-library/asset/%s" % asset_id
+						"browse_url": "https://godotengine.org/asset-library/asset/%s" % asset_id,
+						"modify_date": item.get("modify_date", "")
 					}
 
 			SOURCE_GODOT_BETA:
@@ -2870,7 +3182,8 @@ func _on_home_most_liked_detail_response(result: int, code: int, body: PackedByt
 						"license": asset.get("license_type", "MIT"),
 						"cost": "Free" if asset.get("price_cent", 0) == 0 else "$%.2f" % (asset.get("price_cent", 0) / 100.0),
 						"browse_url": asset.get("store_url", "https://store-beta.godotengine.org/asset/%s/%s/" % [publisher_slug, asset_slug]),
-						"reviews_score": asset.get("reviews_score", 0)
+						"reviews_score": asset.get("reviews_score", 0),
+						"modify_date": asset.get("updated_at", "")
 					}
 
 			SOURCE_SHADERS:
@@ -3066,7 +3379,8 @@ func _parse_home_beta_response(data: Variant, section_data: Dictionary, containe
 			"license": asset.get("license_type", "MIT"),
 			"cost": "Free" if asset.get("price_cent", 0) == 0 else "$%.2f" % (asset.get("price_cent", 0) / 100.0),
 			"browse_url": asset.get("store_url", "https://store-beta.godotengine.org/asset/%s/%s/" % [publisher_slug, asset_slug]),
-			"reviews_score": asset.get("reviews_score", 0)
+			"reviews_score": asset.get("reviews_score", 0),
+			"modify_date": asset.get("updated_at", "")
 		}
 
 		# Skip AssetPlus
@@ -3109,7 +3423,8 @@ func _parse_home_assetlib_response(data: Variant, section_data: Dictionary, cont
 			"license": item.get("cost", "MIT"),
 			"cost": "Free",
 			"godot_version": item.get("godot_version", "4.0"),
-			"browse_url": "https://godotengine.org/asset-library/asset/%s" % asset_id
+			"browse_url": "https://godotengine.org/asset-library/asset/%s" % asset_id,
+			"modify_date": item.get("modify_date", "")
 		}
 
 		# Skip AssetPlus
@@ -3200,9 +3515,23 @@ func _parse_home_shaders_response(data: Variant, section_data: Dictionary, conta
 				_:
 					category = shader_type.replace("_", " ").capitalize()
 
+		# Extract like count from gds-shader-card__stat-num
+		var like_count = 0
+		var likes_regex = RegEx.new()
+		likes_regex.compile('class="[^"]*gds-shader-card__stat-num[^"]*"[^>]*>(\\d+)<')
+		var likes_match = likes_regex.search(card_html)
+		if likes_match:
+			like_count = int(likes_match.get_string(1))
+
+		var asset_id = "shader-" + slug
+
+		# Update likes cache with shader like count
+		if like_count > 0:
+			_likes_cache[asset_id] = like_count
+
 		var info = {
 			"source": SOURCE_SHADERS,
-			"asset_id": "shader-" + slug,
+			"asset_id": asset_id,
 			"title": title,
 			"author": author,
 			"category": category,
@@ -3212,7 +3541,8 @@ func _parse_home_shaders_response(data: Variant, section_data: Dictionary, conta
 			"icon_url": icon_url,
 			"license": "MIT",
 			"cost": "Free",
-			"browse_url": link
+			"browse_url": link,
+			"like_count": like_count
 		}
 
 		section_data.assets.append(info)
@@ -3448,6 +3778,13 @@ func _show_global_folder() -> void:
 			var full_path = global_folder.path_join(file_name)
 			var manifest = _read_godotpackage_manifest(full_path)
 			if not manifest.is_empty():
+				# Get file modification time for package date
+				var package_date = ""
+				var file_modified = FileAccess.get_modified_time(full_path)
+				if file_modified > 0:
+					var datetime = Time.get_datetime_dict_from_unix_time(file_modified)
+					package_date = "%04d-%02d-%02d" % [datetime.year, datetime.month, datetime.day]
+
 				# Build info dictionary for the card
 				var info: Dictionary = {
 					"asset_id": "global_" + file_name.get_basename(),
@@ -3463,7 +3800,8 @@ func _show_global_folder() -> void:
 					"original_browse_url": manifest.get("original_browse_url", ""),
 					"original_url": manifest.get("original_url", ""),
 					"icon_url": manifest.get("icon_url", ""),
-					"original_asset_id": manifest.get("original_asset_id", "")
+					"original_asset_id": manifest.get("original_asset_id", ""),
+					"package_date": package_date
 				}
 
 				# Try to extract embedded icon from the .godotpackage
@@ -3796,14 +4134,17 @@ func _on_extract_package_requested(info: Dictionary, target_folder: String) -> v
 	# Get package name for subfolder
 	var package_name = godotpackage_path.get_file().get_basename()
 
-	# Read manifest to get proper name if available
+	# Read manifest to get proper name and check for preserve_structure flag
 	var reader = ZIPReader.new()
 	var err = reader.open(godotpackage_path)
 	if err != OK:
 		push_error("AssetPlus: Failed to open package for extraction: %s" % godotpackage_path)
 		return
 
-	# Try to get name from manifest
+	var preserve_structure = false
+	var pack_root = ""
+
+	# Try to get name and settings from manifest
 	for file_path in reader.get_files():
 		if file_path == "manifest.json":
 			var data = reader.read_file(file_path)
@@ -3813,9 +4154,11 @@ func _on_extract_package_requested(info: Dictionary, target_folder: String) -> v
 				if manifest.has("name") and not manifest["name"].is_empty():
 					# Sanitize name for folder
 					package_name = manifest["name"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+				preserve_structure = manifest.get("preserve_structure", false)
+				pack_root = manifest.get("pack_root", "")
 			break
 
-	# Create target subfolder
+	# Always extract to a subfolder, preserving the res:// structure inside
 	var extract_folder = target_folder.path_join(package_name)
 	err = DirAccess.make_dir_recursive_absolute(extract_folder)
 	if err != OK:
@@ -3823,14 +4166,21 @@ func _on_extract_package_requested(info: Dictionary, target_folder: String) -> v
 		reader.close()
 		return
 
-	# Extract all files except manifest.json
 	var extracted_count = 0
+
 	for file_path in reader.get_files():
-		if file_path == "manifest.json":
-			continue  # Skip manifest
+		if file_path == "manifest.json" or file_path == "icon.png":
+			continue
 
 		var data = reader.read_file(file_path)
-		var target_path = extract_folder.path_join(file_path)
+
+		# Remove pack_root prefix to get the relative path
+		var rel_path = file_path
+		if not pack_root.is_empty() and file_path.begins_with(pack_root):
+			rel_path = file_path.substr(pack_root.length())
+
+		# Target path: extract_folder/rel_path (preserves structure)
+		var target_path = extract_folder.path_join(rel_path)
 
 		# Create subdirectories if needed
 		var dir_path = target_path.get_base_dir()
@@ -3845,9 +4195,9 @@ func _on_extract_package_requested(info: Dictionary, target_folder: String) -> v
 		else:
 			push_error("AssetPlus: Failed to write: %s" % target_path)
 
-	reader.close()
-
 	SettingsDialog.debug_print(" Extracted %d files to %s" % [extracted_count, extract_folder])
+
+	reader.close()
 
 	# Show success message
 	var success_dialog = AcceptDialog.new()
@@ -4329,13 +4679,22 @@ func _on_most_liked_response(result: int, code: int, body: PackedByteArray) -> v
 		return
 
 	# Store asset IDs and their like counts for later sorting
+	# Also update likes cache so cards display correct counts
 	_most_liked_asset_ids.clear()
 	for item in data:
 		if item is Dictionary and item.has("id"):
+			var asset_id = str(item.get("id", ""))
+			var like_count = int(item.get("count", 0))
 			_most_liked_asset_ids.append({
-				"id": item.get("id", ""),
-				"count": int(item.get("count", 0))
+				"id": asset_id,
+				"count": like_count
 			})
+			# Update likes cache with the count from API response
+			_likes_cache[asset_id] = like_count
+
+	# Save updated cache
+	if not _most_liked_asset_ids.is_empty():
+		_save_likes_cache()
 
 	# Now fetch details for each asset from the appropriate source
 	_most_liked_fetching_details = true
@@ -4513,7 +4872,7 @@ func _on_most_liked_asset_details(result: int, code: int, body: PackedByteArray,
 					"license": data.get("license_type", "MIT"),
 					"support_level": "",
 					"browse_url": "https://store-beta.godotengine.org/asset/%s/%s/" % [publisher_slug, asset_slug] if publisher_slug and asset_slug else "https://store-beta.godotengine.org",
-					"modify_date": ""
+					"modify_date": data.get("updated_at", "")
 				}
 
 	if not info.is_empty() and not _is_assetplus(info):
@@ -5060,9 +5419,24 @@ func _on_godot_shaders_response(result: int, code: int, body: PackedByteArray) -
 				_:
 					category = shader_type.replace("_", " ").capitalize()
 
+		# Extract like count from gds-shader-card__stat-num (inside gds-shader-card__like div)
+		var like_count = 0
+		var likes_regex = RegEx.new()
+		# Pattern: <span class="gds-shader-card__stat-num">NUMBER</span>
+		likes_regex.compile('class="[^"]*gds-shader-card__stat-num[^"]*"[^>]*>(\\d+)<')
+		var likes_match = likes_regex.search(card_html)
+		if likes_match:
+			like_count = int(likes_match.get_string(1))
+
+		var asset_id = "shader-" + slug
+
+		# Update likes cache with shader like count
+		if like_count > 0:
+			_likes_cache[asset_id] = like_count
+
 		_shaders_all_assets.append({
 			"source": SOURCE_SHADERS,
-			"asset_id": "shader-" + slug,
+			"asset_id": asset_id,
 			"title": title,
 			"author": author,
 			"category": category,
@@ -5072,7 +5446,8 @@ func _on_godot_shaders_response(result: int, code: int, body: PackedByteArray) -
 			"icon_url": icon_url,
 			"license": "MIT",
 			"cost": "Free",
-			"browse_url": link
+			"browse_url": link,
+			"like_count": like_count
 		})
 
 	SettingsDialog.debug_print(" Parsed %d shaders from JSON API" % _shaders_all_assets.size())
@@ -6308,6 +6683,42 @@ func _on_install_requested(info: Dictionary) -> void:
 		_on_global_folder_install_requested(info)
 		return
 
+	# Handle Godot Shaders - use shader install dialog
+	if source == SOURCE_SHADERS:
+		var shader_code = info.get("shader_code", "")
+		if shader_code.is_empty():
+			push_error("AssetPlus: No shader code provided for installation")
+			var url = info.get("browse_url", "")
+			if not url.is_empty():
+				OS.shell_open(url)
+			return
+
+		var install_dialog = InstallDialog.new()
+		EditorInterface.get_base_control().add_child(install_dialog)
+		install_dialog.setup_from_shader(info)
+		var asset_id = info.get("asset_id", "")
+		install_dialog.installation_complete.connect(func(success, paths: Array, tracked_uids: Array):
+			SettingsDialog.debug_print("Shader installation_complete: success=%s, paths=%s" % [success, str(paths)])
+			if success:
+				for p in paths:
+					if p not in _session_installed_paths:
+						_session_installed_paths.append(p)
+				if paths.size() > 0:
+					var reg_asset_id = asset_id
+					if reg_asset_id.is_empty():
+						reg_asset_id = "shader_%d" % Time.get_unix_time_from_system()
+					SettingsDialog.debug_print("Registering shader: %s with paths %s" % [reg_asset_id, str(paths)])
+					_register_installed_addon(reg_asset_id, paths, info, tracked_uids)
+					_update_card_installed_status(reg_asset_id, true)
+				if _current_detail_dialog and is_instance_valid(_current_detail_dialog):
+					_current_detail_dialog.set_installed(true, paths)
+				if _current_tab == Tab.INSTALLED:
+					await get_tree().create_timer(0.5).timeout
+					_show_installed()
+		)
+		install_dialog.popup_centered()
+		return
+
 	var download_url = info.get("download_url", "")
 	if download_url.is_empty():
 		# Fallback to browser
@@ -7293,7 +7704,7 @@ func _add_favorite(info: Dictionary) -> void:
 	var essential_fields = [
 		"asset_id", "title", "author", "source", "category", "tags", "license",
 		"url", "browse_url", "download_url", "icon_url",
-		"description", "version", "godot_version",
+		"description", "version", "godot_version", "modify_date",
 		# GitHub specific
 		"repo_owner", "repo_name", "default_branch",
 		# Local/installed specific
@@ -7426,7 +7837,7 @@ func _do_cleanup_favorites() -> int:
 	var essential_fields = [
 		"asset_id", "title", "author", "source", "category", "tags", "license",
 		"url", "browse_url", "download_url", "icon_url",
-		"description", "version", "godot_version",
+		"description", "version", "godot_version", "modify_date",
 		# GitHub specific
 		"repo_owner", "repo_name", "default_branch",
 		# Local/installed specific
@@ -8418,7 +8829,8 @@ func _on_linkup_assetlib_response(result: int, code: int, body: PackedByteArray,
 						"license": asset.get("license", "MIT"),
 						"support_level": asset.get("support_level", ""),
 						"browse_url": "https://godotengine.org/asset-library/asset/" + asset_id,
-						"installed_path": addon_path
+						"installed_path": addon_path,
+						"modify_date": asset.get("modify_date", "")
 					}
 
 					# Found match!

@@ -2,8 +2,8 @@
 extends PanelContainer
 
 ## Like button with heart icon and counter (like Instagram/Facebook)
-## Shows grey heart when not liked, blue bubble when liked
-## Blue bubble background when count > 0
+## Shows grey heart when not liked, blue bubble when user has liked
+## Grey bubble with count when others liked but not the user
 
 signal like_clicked()
 
@@ -18,21 +18,26 @@ var _anim_tween: Tween
 var _always_show_count: bool = false  # If true, show "0" when count is 0
 
 func _init() -> void:
-	custom_minimum_size = Vector2(55, 26)
+	custom_minimum_size = Vector2(0, 22)  # Smaller height
+	size_flags_horizontal = Control.SIZE_SHRINK_END  # Align to right, grow left
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
 	# Background style (blue bubble when count > 0, transparent otherwise)
 	_bg_style = StyleBoxFlat.new()
 	_bg_style.bg_color = Color(0, 0, 0, 0)  # Transparent by default
-	_bg_style.set_corner_radius_all(13)
+	_bg_style.set_corner_radius_all(11)
 	_bg_style.set_border_width_all(1)
 	_bg_style.border_color = Color(0.5, 0.5, 0.5, 0.6)  # Grey border
+	_bg_style.content_margin_left = 6
+	_bg_style.content_margin_right = 6
+	_bg_style.content_margin_top = 2
+	_bg_style.content_margin_bottom = 2
 	add_theme_stylebox_override("panel", _bg_style)
 
 	# HBox for heart + count
 	_hbox = HBoxContainer.new()
-	_hbox.add_theme_constant_override("separation", 4)
-	_hbox.set_anchors_preset(Control.PRESET_CENTER)
+	_hbox.add_theme_constant_override("separation", 2)  # Reduced gap between heart and count
+	_hbox.size_flags_horizontal = Control.SIZE_SHRINK_END  # Align content to right
 	add_child(_hbox)
 
 	# Heart icon
@@ -118,8 +123,8 @@ func _update_display() -> void:
 	if not _heart_label or not _count_label or not _bg_style:
 		return
 
-	# Update background (blue bubble if liked OR count > 0)
-	if _is_liked or _like_count > 0:
+	# Update background (blue bubble ONLY if user has liked, not just because others liked)
+	if _is_liked:
 		_bg_style.bg_color = Color(0.35, 0.55, 0.7, 0.9)  # Muted blue bubble
 		_heart_label.add_theme_color_override("font_color", Color(1, 1, 1, 1.0))  # White heart
 		_count_label.add_theme_color_override("font_color", Color(1, 1, 1, 1.0))  # White count

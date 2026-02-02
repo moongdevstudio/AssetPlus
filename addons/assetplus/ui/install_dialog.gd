@@ -44,6 +44,8 @@ var _last_speed_check_time: int = 0
 var _current_speed: float = 0.0  # Smoothed download speed
 var _redirect_count: int = 0  # Count HTTP redirects for display (1/X, 2/X...)
 var _max_redirects: int = 10  # Maximum redirects before aborting (security limit)
+var _final_download_started: bool = false  # True when we're on the final download (not a redirect)
+var _max_progress_reached: float = 0.0  # Track maximum progress to avoid going backwards
 
 # Installation tracking for error reporting
 var _install_succeeded: Array[String] = []
@@ -357,6 +359,8 @@ func setup(asset_info: Dictionary) -> void:
 		return
 
 	_redirect_count = 0  # Reset redirect count for new download
+	_final_download_started = false  # Not yet on final download
+	_max_progress_reached = 0.0  # Reset max progress
 	_start_download()
 
 
@@ -569,6 +573,143 @@ func setup_from_local_godotpackage(godotpackage_path: String, asset_info: Dictio
 	call_deferred("_analyze_zip")
 
 
+func setup_from_shader(asset_info: Dictionary) -> void:
+	## Setup dialog for installing a shader from Godot Shaders
+	## asset_info must contain: shader_code, title, and optionally shader_description
+	var shader_code = asset_info.get("shader_code", "")
+	if shader_code.is_empty():
+		_set_error("No shader code provided")
+		return
+
+	var shader_title = asset_info.get("title", "shader")
+	var shader_name = _sanitize_shader_name(shader_title)
+	if shader_name.is_empty():
+		shader_name = "shader"
+
+	_asset_info = {
+		"title": shader_title,
+		"author": asset_info.get("author", "Unknown"),
+		"source": "Godot Shaders",
+		"license": asset_info.get("license", "Unknown"),
+		"version": asset_info.get("version", ""),
+		"description": asset_info.get("shader_description", ""),
+		"browse_url": asset_info.get("browse_url", ""),
+		"category": asset_info.get("category", "Shader"),
+		"modify_date": asset_info.get("modify_date", ""),
+		"asset_id": asset_info.get("asset_id", "shader_%s_%d" % [shader_name, Time.get_unix_time_from_system()])
+	}
+
+	title = "Install Shader: %s" % shader_title
+
+	# Set default install root to "shaders" folder
+	_custom_install_root = "res://shaders"
+	_template_folder = ""
+	_default_install_root = "res://shaders"
+	_is_install_at_root = false
+	if _install_path_label:
+		_install_path_label.text = "Install to: res://shaders/"
+	if _install_root_btn:
+		_install_root_btn.button_pressed = false
+		_install_root_btn.visible = false
+
+	# Cleanup any previous resources
+	_cleanup_resources()
+
+	# Create a temporary ZIP with shader files
+	var timestamp = Time.get_unix_time_from_system()
+	_zip_path = "user://temp_shader_%d.zip" % timestamp
+
+	var zip_writer = ZIPPacker.new()
+	var err = zip_writer.open(_zip_path)
+	if err != OK:
+		_set_error("Cannot create temp ZIP file")
+		return
+
+	# Add shader file: shaders/shader_name/shader_name.gdshader
+	var shader_rel_path = "%s/%s.gdshader" % [shader_name, shader_name]
+	zip_writer.start_file(shader_rel_path)
+	zip_writer.write_file(shader_code.to_utf8_buffer())
+	zip_writer.close_file()
+
+	# Add howtouse.md: shaders/shader_name/howtouse.md
+	var readme_content = _generate_shader_readme(_asset_info)
+	var readme_rel_path = "%s/howtouse.md" % shader_name
+	zip_writer.start_file(readme_rel_path)
+	zip_writer.write_file(readme_content.to_utf8_buffer())
+	zip_writer.close_file()
+
+	zip_writer.close()
+
+	_progress_bar.value = 100
+	_status_label.text = "Ready to install shader..."
+
+	# Force package type to ASSET (simple file extraction)
+	_package_type = PackageType.ASSET
+	_asset_folder_name = shader_name
+
+	call_deferred("_analyze_zip")
+
+
+func _sanitize_shader_name(name: String) -> String:
+	## Sanitize a shader name to be used as a folder/file name
+	var result = name.to_lower()
+	# Replace spaces and special chars with underscores
+	result = result.replace(" ", "_")
+	result = result.replace("-", "_")
+	# Remove any characters that aren't alphanumeric or underscore
+	var clean_regex = RegEx.new()
+	clean_regex.compile('[^a-z0-9_]')
+	result = clean_regex.sub(result, "", true)
+	# Remove consecutive underscores
+	while "__" in result:
+		result = result.replace("__", "_")
+	# Trim underscores from ends
+	result = result.strip_edges()
+	while result.begins_with("_"):
+		result = result.substr(1)
+	while result.ends_with("_"):
+		result = result.substr(0, result.length() - 1)
+	return result
+
+
+func _generate_shader_readme(info: Dictionary) -> String:
+	## Generate a howtouse.md file content from shader info
+	var md = "# %s\n\n" % info.get("title", "Shader")
+
+	# Add metadata
+	md += "**Author:** %s\n\n" % info.get("author", "Unknown")
+	md += "**Category:** %s\n\n" % info.get("category", "Shader")
+	md += "**License:** %s\n\n" % info.get("license", "Unknown")
+
+	# Add date if available
+	var modify_date = info.get("modify_date", "")
+	if not modify_date.is_empty():
+		md += "**Last Updated:** %s\n\n" % modify_date
+
+	# Add source link
+	var browse_url = info.get("browse_url", "")
+	if not browse_url.is_empty():
+		md += "**Source:** [Godot Shaders](%s)\n\n" % browse_url
+
+	md += "---\n\n"
+
+	var description = info.get("description", "")
+	if not description.is_empty():
+		md += "## Description\n\n"
+		md += description + "\n\n"
+		md += "---\n\n"
+
+	# Only add generic "How to Use" if description doesn't already contain usage instructions
+	if description.is_empty() or (not "how to use" in description.to_lower() and not "how to" in description.to_lower()):
+		md += "## How to Use\n\n"
+		md += "1. Create a new ShaderMaterial in Godot\n"
+		md += "2. Assign the `.gdshader` file to the material's Shader property\n"
+		md += "3. Apply the material to your node (Sprite2D, MeshInstance3D, etc.)\n"
+		md += "4. Adjust the shader parameters in the Inspector\n"
+
+	return md
+
+
 func _add_folder_to_zip(zip_writer: ZIPPacker, folder_path: String, base_name: String, current_rel: String = "") -> int:
 	## Recursively add folder contents to ZIP, returns number of files added
 	var files_added = 0
@@ -637,7 +778,8 @@ func _start_download() -> void:
 		_status_label.text = "Connecting... (%d/%d)" % [_redirect_count, _max_redirects]
 	else:
 		_status_label.text = "Connecting..."
-	_progress_bar.value = 0
+		# Only reset progress bar on first download, not on redirects
+		_progress_bar.value = 0
 
 	if _http_request:
 		_http_request.cancel_request()
@@ -654,11 +796,13 @@ func _start_download() -> void:
 
 	_http_request.request_completed.connect(_on_download_complete)
 
-	# Start progress tracking timer
-	_download_start_time = Time.get_ticks_msec()
-	_last_speed_check_time = _download_start_time
-	_last_downloaded_bytes = 0
-	_current_speed = 0.0
+	# Start progress tracking timer (only reset counters on first download, not redirects)
+	if _redirect_count <= 1:
+		_download_start_time = Time.get_ticks_msec()
+		_last_speed_check_time = _download_start_time
+		_last_downloaded_bytes = 0
+		_current_speed = 0.0
+
 	if _download_timer:
 		_download_timer.queue_free()
 	_download_timer = Timer.new()
@@ -698,54 +842,57 @@ func _update_download_progress() -> void:
 	var total = _http_request.get_body_size()
 	var current_time = Time.get_ticks_msec()
 
-	# Calculate instantaneous speed with smoothing
-	var time_delta_ms = current_time - _last_speed_check_time
-	if time_delta_ms >= 200:  # Update speed every 200ms for stability
-		var bytes_delta = downloaded - _last_downloaded_bytes
-		if bytes_delta > 0 and time_delta_ms > 0:
-			var instant_speed = (bytes_delta / (time_delta_ms / 1000.0))
-			# Smooth speed using exponential moving average (0.3 = more responsive, 0.7 = smoother)
-			if _current_speed <= 0:
-				_current_speed = instant_speed
-			else:
-				_current_speed = _current_speed * 0.6 + instant_speed * 0.4
-		_last_downloaded_bytes = downloaded
-		_last_speed_check_time = current_time
+	# Detect if this is a real download (not just a redirect response)
+	# Redirects have small body size, real downloads have significant data
+	if total > 1000 or downloaded > 1000:
+		_final_download_started = true
 
-	# Build redirect suffix for display (e.g., " (2/5)" when there are redirects)
-	var redirect_suffix = ""
-	if _redirect_count > 1:
-		redirect_suffix = " (%d/%d)" % [_redirect_count, _max_redirects]
+	# Calculate instantaneous speed with smoothing (only for real downloads)
+	if _final_download_started:
+		var time_delta_ms = current_time - _last_speed_check_time
+		if time_delta_ms >= 200:  # Update speed every 200ms for stability
+			var bytes_delta = downloaded - _last_downloaded_bytes
+			if bytes_delta > 0 and time_delta_ms > 0:
+				var instant_speed = (bytes_delta / (time_delta_ms / 1000.0))
+				# Smooth speed using exponential moving average
+				if _current_speed <= 0:
+					_current_speed = instant_speed
+				else:
+					_current_speed = _current_speed * 0.6 + instant_speed * 0.4
+			_last_downloaded_bytes = downloaded
+			_last_speed_check_time = current_time
 
-	if total > 0:
+	# Only update progress bar once we're in the final download
+	if _final_download_started and total > 0:
 		var percent = (float(downloaded) / total) * 100.0
-		_progress_bar.value = percent
+		# Never let progress go backwards
+		if percent > _max_progress_reached:
+			_max_progress_reached = percent
+			_progress_bar.value = percent
 
 		var speed_str = ""
 		var elapsed_ms = current_time - _download_start_time
 		if elapsed_ms > 300 and _current_speed > 0:
 			speed_str = " @ %s/s" % _format_size(int(_current_speed))
 
-		_status_label.text = "Downloading%s: %s / %s (%.0f%%)%s" % [
-			redirect_suffix,
+		_status_label.text = "Downloading: %s / %s (%.0f%%)%s" % [
 			_format_size(downloaded),
 			_format_size(total),
-			percent,
+			_max_progress_reached,
 			speed_str
 		]
-	elif downloaded > 0:
-		# Unknown total size
+	elif _final_download_started and downloaded > 0:
+		# Unknown total size - show bytes downloaded
 		var speed_str = ""
 		if _current_speed > 0:
 			speed_str = " @ %s/s" % _format_size(int(_current_speed))
-		_status_label.text = "Downloading%s: %s...%s" % [redirect_suffix, _format_size(downloaded), speed_str]
-		# Show indeterminate progress
-		_progress_bar.value = fmod(current_time / 50.0, 100.0)
+		_status_label.text = "Downloading: %s...%s" % [_format_size(downloaded), speed_str]
+		# Keep bar stable when size unknown
+		if _progress_bar.value < 10:
+			_progress_bar.value = 10
 	else:
-		if _redirect_count > 1:
-			_status_label.text = "Connecting... (%d/%d)" % [_redirect_count, _max_redirects]
-		else:
-			_status_label.text = "Connecting..."
+		# Still in redirect phase or connecting
+		_status_label.text = "Connecting..."
 
 
 func _on_download_complete(result: int, code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -757,8 +904,8 @@ func _on_download_complete(result: int, code: int, headers: PackedStringArray, b
 
 	# Handle redirect with depth limit to prevent infinite loops
 	if code == 302 or code == 301:
-		_redirect_count += 1
-		if _redirect_count > _max_redirects:
+		# Note: _redirect_count is incremented in _start_download(), not here
+		if _redirect_count >= _max_redirects:
 			_set_error("Too many redirects (%d). Possible redirect loop." % _redirect_count)
 			return
 		for header in headers:
@@ -1197,12 +1344,13 @@ func _build_asset_file_list(files: PackedStringArray) -> void:
 	# If ZIP already has a common root folder, keep it as-is
 	# Otherwise, create a folder from asset title
 	var asset_folder = ""
+	var base_install_path = _custom_install_root if not _custom_install_root.is_empty() else "res://assets"
 	if all_have_common_root and not common_root.is_empty():
 		# ZIP already has a folder structure - use it
 		asset_folder = ""  # Don't add extra folder
 		_asset_folder_name = common_root  # Store for folder change
 		if _install_path_label:
-			_install_path_label.text = "Install to: res://assets/%s/" % common_root
+			_install_path_label.text = "Install to: %s/%s/" % [base_install_path, common_root]
 	else:
 		# No common root - create folder from asset title
 		asset_folder = _asset_info.get("title", "asset").to_snake_case()
@@ -1214,7 +1362,7 @@ func _build_asset_file_list(files: PackedStringArray) -> void:
 			asset_folder = "asset"
 		_asset_folder_name = asset_folder  # Store for folder change
 		if _install_path_label:
-			_install_path_label.text = "Install to: res://assets/%s/" % asset_folder
+			_install_path_label.text = "Install to: %s/%s/" % [base_install_path, asset_folder]
 
 	for file_path in files:
 		if file_path.ends_with("/"):
@@ -1242,8 +1390,9 @@ func _build_godotpackage_file_list(files: PackedStringArray) -> void:
 		pack_root += "/"
 
 	var pkg_name = _godotpackage_manifest.get("name", "package")
+	var preserve_structure = _godotpackage_manifest.get("preserve_structure", false)
 
-	SettingsDialog.debug_print("GDPKG: pack_root='%s', pkg_name='%s'" % [pack_root, pkg_name])
+	SettingsDialog.debug_print("GDPKG: pack_root='%s', pkg_name='%s', preserve_structure=%s" % [pack_root, pkg_name, preserve_structure])
 	SettingsDialog.debug_print("GDPKG: manifest type='%s'" % _godotpackage_manifest.get("type", "<not set>"))
 
 	# Determine package sub-type from manifest
@@ -1278,6 +1427,8 @@ func _build_godotpackage_file_list(files: PackedStringArray) -> void:
 		_install_root_btn.button_pressed = false
 		_update_install_root_button_style()
 
+	# For preserve_structure packages, files are installed to a subfolder with structure preserved
+	# After installation, paths in scenes/scripts will be rewritten to point to the new location
 	match pkg_type:
 		"plugin", "addon":
 			if _install_path_label:
@@ -3088,14 +3239,48 @@ func _parse_property_value(value_str: String):
 
 func _adapt_path_to_install_root(original_path: String, install_root: String) -> String:
 	## Adapt a res:// path to the new install root
-	## Universal logic: res://source_folder/xxx -> res://install_root/xxx
-	## Works for any package type and any install location
+	## For preserve_structure packages: check if the path is in the package files list
+	## For other packages: res://source_folder/xxx -> res://install_root/xxx
 	if not original_path.begins_with("res://"):
 		return original_path
 
 	# Get the relative part after res://
 	var relative_part = original_path.substr(6)  # Remove "res://"
 
+	# Check if this is a preserve_structure package
+	var preserve_structure = _godotpackage_manifest.get("preserve_structure", false)
+	var manifest_files: Array = _godotpackage_manifest.get("files", [])
+	var common_root: String = _godotpackage_manifest.get("common_root", "")
+
+	if preserve_structure and manifest_files.size() > 0:
+		# For preserve_structure packages, check if the path is in the package
+		# The manifest "files" array contains paths relative to common_root
+		# But the original .tscn files reference the FULL path (with common_root)
+
+		# First, try to match the path after stripping common_root
+		var path_without_root = relative_part
+		if not common_root.is_empty() and relative_part.begins_with(common_root):
+			path_without_root = relative_part.substr(common_root.length())
+
+		if path_without_root in manifest_files:
+			# This file is in the package, adapt its path
+			var install_relative = ""
+			if install_root.begins_with("res://"):
+				install_relative = install_root.substr(6)
+			else:
+				install_relative = install_root
+			install_relative = install_relative.trim_suffix("/")
+
+			if install_relative.is_empty():
+				return "res://" + path_without_root
+			else:
+				return "res://" + install_relative + "/" + path_without_root
+		else:
+			# This path is not in the package, leave it unchanged
+			# (it might be a built-in Godot path or external dependency)
+			return original_path
+
+	# Legacy/default behavior for non-preserve_structure packages
 	# Get source folder from manifest (the original folder name when exported)
 	var source_folder = _godotpackage_manifest.get("source_folder", "")
 
@@ -3278,6 +3463,18 @@ func _adapt_script_paths_in_files(install_root: String) -> void:
 					if new_path != original_path:
 						var new_match = '%s%s"' % [prefix, new_path]
 						replacements.append({"from": full_match, "to": new_match})
+
+				# Also remove UIDs from ext_resource lines that had their paths changed
+				# This forces Godot to use the new path instead of cached UID references
+				# Pattern: uid="uid://xxxxx" (we'll remove these from modified resources)
+				var preserve_structure = _godotpackage_manifest.get("preserve_structure", false)
+				if preserve_structure:
+					var uid_regex = RegEx.new()
+					uid_regex.compile(' uid="uid://[^"]+"')
+					var uid_matches = uid_regex.search_all(content)
+					for um in uid_matches:
+						var uid_str = um.get_string(0)
+						replacements.append({"from": uid_str, "to": ""})
 
 			"cfg":
 				var matches = cfg_regex.search_all(content)

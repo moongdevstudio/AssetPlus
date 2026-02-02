@@ -338,16 +338,22 @@ func _build_ui_classic() -> void:
 	_plugin_toggle_btn.add_theme_color_override("font_hover_color", Color(0.9, 0.9, 0.9))
 	_plugin_toggle_btn.add_theme_color_override("font_pressed_color", Color(0.9, 1.0, 0.9))
 
-	# Like button - positioned absolutely in TOP-right corner
+	# Like button container - anchored top-right, contains the dynamically-sized button
+	var like_container = Control.new()
+	like_container.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	like_container.offset_left = -120
+	like_container.offset_top = -11
+	like_container.offset_right = -4
+	like_container.offset_bottom = 15
+	add_child(like_container)
+
+	# Like button inside container - aligned to right edge
 	_like_button = LikeButton.new()
-	_like_button.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_like_button.offset_left = -70
-	_like_button.offset_top = 2
-	_like_button.offset_right = -4
-	_like_button.offset_bottom = 28
+	_like_button.set_anchors_preset(Control.PRESET_CENTER_RIGHT)
+	_like_button.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_like_button.like_clicked.connect(_on_favorite_pressed)
 	_like_button.set_clickable(true)
-	add_child(_like_button)
+	like_container.add_child(_like_button)
 
 	# Keep favorite button for compatibility (hidden, replaced by like_button)
 	_favorite_btn = Button.new()
@@ -427,16 +433,22 @@ func _build_ui_modern() -> void:
 	_icon_rect.clip_contents = true
 	_image_container.add_child(_icon_rect)
 
-	# Like button - positioned absolutely in BOTTOM-right corner of card
+	# Like button container - anchored bottom-right, contains the dynamically-sized button
+	var like_container = Control.new()
+	like_container.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	like_container.offset_left = -120
+	like_container.offset_top = -51
+	like_container.offset_right = -6
+	like_container.offset_bottom = -29
+	add_child(like_container)
+
+	# Like button inside container - aligned to right edge
 	_like_button = LikeButton.new()
-	_like_button.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_like_button.offset_left = -71
-	_like_button.offset_top = -40
-	_like_button.offset_right = -13
-	_like_button.offset_bottom = -20
+	_like_button.set_anchors_preset(Control.PRESET_CENTER_RIGHT)
+	_like_button.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_like_button.like_clicked.connect(_on_favorite_pressed)
 	_like_button.set_clickable(true)
-	add_child(_like_button)
+	like_container.add_child(_like_button)
 
 	# Keep favorite button for compatibility (hidden)
 	_favorite_btn = Button.new()

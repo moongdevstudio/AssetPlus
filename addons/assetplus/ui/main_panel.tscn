@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://bq0tq1vk4c1lu"]
 
-[ext_resource type="Script" uid="uid://d0gg4l38375l7" path="res://addons/assetplus/ui/main_panel.gd" id="1"]
+[ext_resource type="Script" uid="uid://bx153ku42nsav" path="res://addons/assetplus/ui/main_panel.gd" id="1"]
 
 [sub_resource type="DPITexture" id="DPITexture_vwdxe"]
 _source = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><path fill=\"#e0e0e0\" d=\"M10.168 8.754a5 5 0 1 0-1.414 1.414l4.316 4.316 1.414-1.414zM6 3a3 3 0 0 1 0 6 3 3 0 0 1 0-6z\"/></svg>
@@ -182,27 +182,9 @@ text = "Category:"
 visible = false
 layout_mode = 2
 selected = 0
-item_count = 10
+item_count = 1
 popup/item_0/text = "All"
 popup/item_0/id = 0
-popup/item_1/text = "2D"
-popup/item_1/id = 1
-popup/item_2/text = "2D Tools"
-popup/item_2/id = 2
-popup/item_3/text = "3D"
-popup/item_3/id = 3
-popup/item_4/text = "3D, Materials"
-popup/item_4/id = 4
-popup/item_5/text = "3D, Templates"
-popup/item_5/id = 5
-popup/item_6/text = "Tools"
-popup/item_6/id = 6
-popup/item_7/text = "Tools, 3D"
-popup/item_7/id = 7
-popup/item_8/text = "VFX"
-popup/item_8/id = 8
-popup/item_9/text = "asset"
-popup/item_9/id = 9
 
 [node name="FilterSourceLabel" type="Label" parent="VBox/TopBar" unique_id=992030587]
 visible = false
@@ -213,17 +195,9 @@ text = "Source:"
 visible = false
 layout_mode = 2
 selected = 0
-item_count = 5
+item_count = 1
 popup/item_0/text = "All"
 popup/item_0/id = 0
-popup/item_1/text = "Godot AssetLib"
-popup/item_1/id = 1
-popup/item_2/text = "Godot Store Beta"
-popup/item_2/id = 2
-popup/item_3/text = "GlobalFolder"
-popup/item_3/id = 3
-popup/item_4/text = "Unknown"
-popup/item_4/id = 4
 
 [node name="SortLabel" type="Label" parent="VBox/TopBar" unique_id=243971069]
 layout_mode = 2
@@ -233,11 +207,11 @@ text = "Sort:"
 layout_mode = 2
 selected = 0
 item_count = 3
-popup/item_0/text = "Recently Updated"
+popup/item_0/text = "Newest"
 popup/item_0/id = 0
-popup/item_1/text = "Relevance"
+popup/item_1/text = "Most Liked"
 popup/item_1/id = 1
-popup/item_2/text = "Most Liked"
+popup/item_2/text = "Alphabetical"
 popup/item_2/id = 2
 
 [node name="CatLabel" type="Label" parent="VBox/TopBar" unique_id=810933379]
@@ -247,23 +221,19 @@ text = "Category:"
 [node name="CategoryFilter" type="OptionButton" parent="VBox/TopBar" unique_id=635717681]
 layout_mode = 2
 selected = 0
-item_count = 8
+item_count = 6
 popup/item_0/text = "All"
 popup/item_0/id = 0
-popup/item_1/text = "2D"
+popup/item_1/text = "2D (Canvas Item)"
 popup/item_1/id = 1
-popup/item_2/text = "3D"
+popup/item_2/text = "3D (Spatial)"
 popup/item_2/id = 2
-popup/item_3/text = "Tool"
+popup/item_3/text = "Sky"
 popup/item_3/id = 3
-popup/item_4/text = "Audio"
+popup/item_4/text = "Particles"
 popup/item_4/id = 4
-popup/item_5/text = "Template"
+popup/item_5/text = "Fog"
 popup/item_5/id = 5
-popup/item_6/text = "Materials"
-popup/item_6/id = 6
-popup/item_7/text = "VFX"
-popup/item_7/id = 7
 
 [node name="SiteLabel" type="Label" parent="VBox/TopBar" unique_id=577963522]
 layout_mode = 2
@@ -271,7 +241,7 @@ text = "Site:"
 
 [node name="SourceFilter" type="OptionButton" parent="VBox/TopBar" unique_id=423562946]
 layout_mode = 2
-selected = 0
+selected = 2
 item_count = 4
 popup/item_0/text = "Godot Store Beta"
 popup/item_0/id = 0
