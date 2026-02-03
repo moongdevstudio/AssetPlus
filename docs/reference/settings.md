@@ -33,7 +33,7 @@ Enable or disable asset sources:
 
 - **Godot Asset Library** - Official Godot repository
 - **Godot Store Beta** - New Godot store
-- **Godot Shaders** - Community shaders (browse only)
+- **Godot Shaders** - Community shaders with direct download
 
 Disabled stores won't appear in the source dropdown.
 

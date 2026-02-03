@@ -30,7 +30,7 @@ When installing templates or full demo projects, you can select exactly what to 
 - Preview the installation path before confirming
 
 !!! tip
-    For Godot Shaders, clicking Install will redirect you to the shader's page on godotshaders.com where you can copy the shader code.
+    For Godot Shaders, you can download shader files directly into your project using the Download button.
 
 ## Managing Installed Addons
 

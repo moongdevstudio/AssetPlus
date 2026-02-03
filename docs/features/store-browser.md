@@ -34,8 +34,8 @@ The new Godot store at [store-beta.godotengine.org](https://store-beta.godotengi
 Community shaders from [godotshaders.com](https://godotshaders.com/).
 
 - Browse and search shaders
-- **Browse only** - clicking on a shader redirects to the website
-- Copy shader code manually from the site
+- **Direct download** - download shader files directly into your project
+- View shader code and preview
 
 ## Searching
 

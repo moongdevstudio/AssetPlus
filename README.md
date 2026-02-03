@@ -41,7 +41,7 @@ The new Home page displays curated content from all stores in a modern carousel 
 ### Browse Multiple Sources
 - **Godot AssetLib** - Official Godot Asset Library
 - **Godot Store Beta** - New Godot store (store-beta.godotengine.org)
-- **Godot Shaders** - Community shaders from godotshaders.com (browse only, redirects to site)
+- **Godot Shaders** - Community shaders from godotshaders.com with direct download support
 
 ### Likes System
 Like your favorite assets and see what's popular in the community:
